@@ -1,0 +1,30 @@
+# Environment variables with sensitive credentials
+.env
+
+# SSL certificates
+nginx/ssl/*.crt
+nginx/ssl/*.key
+nginx/ssl/*.pem
+
+# ACME.sh certificates
+acme/ssl/*.crt
+acme/ssl/*.key
+
+# Xray logs
+xray/log/*.log
+
+# Nginx logs
+nginx/log/*.log
+
+# Docker volumes
+*.log
+
+# Build artifacts
+node_modules/
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Deployment config
+.deployment-config

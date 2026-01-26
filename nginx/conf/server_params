@@ -1,0 +1,38 @@
+listen       80;
+listen       [::]:80;
+#listen       127.0.0.1:443 ssl proxy_protocol;
+listen       8443 ssl proxy_protocol;
+http2  on;
+root   $root_path;
+set_real_ip_from 127.0.0.1;
+real_ip_header proxy_protocol;
+
+ssl_protocols         TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+ssl_certificate /etc/nginx/cert/default_cert.pem;
+ssl_certificate_key /etc/nginx/cert/default_key.pem;
+ssl_session_cache shared:SSL:1m;
+ssl_session_timeout  10m;
+ssl_ciphers HIGH:!aNULL:!MD5;
+ssl_prefer_server_ciphers on;
+
+# Load configuration files for the default server block.
+#include /etc/nginx/default.d/*.conf;
+
+location / {
+    index  index.html index.htm;
+}
+
+location ~ \.php$ {
+    fastcgi_pass   127.0.0.1:9000;
+    fastcgi_index  index.php;
+    fastcgi_param  SCRIPT_FILENAME  /www$fastcgi_script_name;
+    include        fastcgi_params;
+}
+
+error_page 404 /404.html;
+    location = /40x.html {
+}
+
+error_page 500 502 503 504 /50x.html;
+    location = /50x.html {
+}
