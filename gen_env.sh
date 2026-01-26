@@ -19,16 +19,25 @@ gen_uuid() {
 }
 
 # 读取现有 .env 文件
-declare -A EXISTING_VARS
+EXISTING_VARS_TEMP=$(mktemp)
 if [ -f "$ENV_FILE" ]; then
     while IFS='=' read -r key value; do
         # 跳过注释和空行
         [[ "$key" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${key// }" ]] && continue
-        # 保留值中的空格
-        EXISTING_VARS["$key"]="$value"
+        echo "$key=$value" >> "$EXISTING_VARS_TEMP"
     done < "$ENV_FILE"
 fi
+
+# 获取现有变量的值
+get_existing_value() {
+    grep "^$1=" "$EXISTING_VARS_TEMP" 2>/dev/null | cut -d'=' -f2-
+}
+
+# 检查变量是否存在
+var_exists() {
+    grep -q "^$1=" "$EXISTING_VARS_TEMP" 2>/dev/null
+}
 
 # 定义所有变量及其默认值（按输出顺序）
 # 格式: "变量名|默认值|分块标题"
@@ -60,57 +69,59 @@ VARS=(
 )
 
 # 记录新增变量和修改的变量
-declare -A NEW_VARS
-declare -A CHANGED_VARS
+NEW_VARS_TEMP=$(mktemp)
+CHANGED_VARS_TEMP=$(mktemp)
 
 # 构建变量值映射
-declare -A FINAL_VARS
-CURRENT_BLOCK=""
+FINAL_VARS_TEMP=$(mktemp)
 
 for var_def in "${VARS[@]}"; do
     IFS='|' read -r var_name default_value block_title <<< "$var_def"
 
     # 确定最终值
-    if [ -n "${EXISTING_VARS[$var_name]+isset}" ]; then
-        final_value="${EXISTING_VARS[$var_name]}"
+    if var_exists "$var_name"; then
+        final_value=$(get_existing_value "$var_name")
         # 检查值是否与默认值不同
         if [ "$final_value" != "$default_value" ]; then
-            CHANGED_VARS["$var_name"]="$default_value -> $final_value"
+            echo "$var_name|$default_value|$final_value" >> "$CHANGED_VARS_TEMP"
         fi
     else
         final_value="$default_value"
-        NEW_VARS["$var_name"]="$default_value"
+        echo "$var_name|$default_value" >> "$NEW_VARS_TEMP"
     fi
 
-    FINAL_VARS["$var_name"]="$final_value"
+    echo "$var_name=$final_value" >> "$FINAL_VARS_TEMP"
 done
 
 # 输出提示信息
-if [ ${#NEW_VARS[@]} -gt 0 ] || [ ${#CHANGED_VARS[@]} -gt 0 ]; then
+if [ -s "$NEW_VARS_TEMP" ] || [ -s "$CHANGED_VARS_TEMP" ]; then
     echo "=========================================="
     echo "环境变量更新信息"
     echo "=========================================="
 
-    if [ ${#NEW_VARS[@]} -gt 0 ]; then
+    if [ -s "$NEW_VARS_TEMP" ]; then
         echo ""
-        echo "新增变量 (${#NEW_VARS[@]}):"
-        for var in "${!NEW_VARS[@]}"; do
-            echo "  - $var=${NEW_VARS[$var]}"
-        done
+        echo "新增变量 ($(wc -l < "$NEW_VARS_TEMP" | tr -d ' ')):"
+        while IFS='|' read -r var_name default_value; do
+            echo "  - $var_name=$default_value"
+        done < "$NEW_VARS_TEMP"
     fi
 
-    if [ ${#CHANGED_VARS[@]} -gt 0 ]; then
+    if [ -s "$CHANGED_VARS_TEMP" ]; then
         echo ""
-        echo "值已变更 (${#CHANGED_VARS[@]}):"
-        for var in "${!CHANGED_VARS[@]}"; do
-            echo "  - $var: ${CHANGED_VARS[$var]}"
-        done
+        echo "值已变更 ($(wc -l < "$CHANGED_VARS_TEMP" | tr -d ' ')):"
+        while IFS='|' read -r var_name default_value final_value; do
+            echo "  - $var_name: $default_value -> $final_value"
+        done < "$CHANGED_VARS_TEMP"
     fi
 
     echo ""
     echo "=========================================="
     echo ""
 fi
+
+# 清理临时文件
+rm -f "$EXISTING_VARS_TEMP" "$NEW_VARS_TEMP" "$CHANGED_VARS_TEMP"
 
 # 生成 .env 文件
 # 清空文件
@@ -133,7 +144,11 @@ for var_def in "${VARS[@]}"; do
     fi
 
     # 输出变量
-    echo "${var_name}=${FINAL_VARS[$var_name]}" >> "$ENV_FILE"
+    final_value=$(grep "^$var_name=" "$FINAL_VARS_TEMP" | cut -d'=' -f2-)
+    echo "${var_name}=${final_value}" >> "$ENV_FILE"
 done
+
+# 清理最后的临时文件
+rm -f "$FINAL_VARS_TEMP"
 
 echo "已生成 $ENV_FILE"
