@@ -50,8 +50,6 @@ VARS=(
     "HTML_PATH|$SCRIPT_DIR/html|"
     "ACME_SH_PATH|$SCRIPT_DIR/acme|"
     "XRAY_PATH|$SCRIPT_DIR/xray|"
-    "HOST_HTTP_PORT|80|#nginx env"
-    "HOST_HTTPS_PORT|443|"
     "Ali_Key||#acme.sh"
     "Ali_Secret||"
     "CF_Key||"
@@ -60,11 +58,6 @@ VARS=(
     "CA_LETSENCRYPT|1|"
     "DOMAIN_LIST||"
     "XRAY_UUID|$(gen_uuid)|#xray"
-    "XRAY_CONF_SUFFIX||"
-    "XRAY_UUID_9000||"
-    "DEFAULT_DNS_SERVER1|8.8.8.8|"
-    "DEFAULT_DNS_SERVER2|8.8.4.4|"
-    "NF_DNS_SERVER|8.8.8.8|"
     "NF_XTLS_SERVER|127.0.0.1:18910|#haproxy"
 )
 
