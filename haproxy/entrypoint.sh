@@ -4,7 +4,7 @@
 
 # 模板文件和输出文件路径
 TEMPLATE_FILE="/usr/local/etc/haproxy/haproxy.cfg.tpl"
-OUTPUT_FILE="/usr/local/etc/haproxy/haproxy.cfg"
+OUTPUT_FILE="/tmp/haproxy.cfg"
 
 # 使用 envsubst 替换环境变量
 envsubst < "$TEMPLATE_FILE" > "$OUTPUT_FILE"

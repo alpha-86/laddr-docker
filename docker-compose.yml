@@ -24,6 +24,7 @@ services:
     network_mode: host
     labels:
       - __nginx__
+    command: sh /entrypoint.sh
     volumes:
       - ${HTML_PATH}:/usr/share/nginx/html
       - ${NGINX_PATH}/www:/var/www
@@ -33,6 +34,7 @@ services:
       - ${NGINX_PATH}/conf/conf.d:/etc/nginx/conf.d
       - ${NGINX_PATH}/ssl:/etc/nginx/cert
       - ${NGINX_PATH}/script:/root/script
+      - ${NGINX_PATH}/entrypoint.sh:/entrypoint.sh:ro
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - NGINX_PORT=80
