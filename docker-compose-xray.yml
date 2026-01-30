@@ -10,7 +10,9 @@ services:
       - ${XRAY_PATH}/init_uuid.sh:/init_uuid.sh
       - ${XRAY_PATH}/etc:/etc/xray
       - ${NGINX_PATH}/ssl:/etc/xray/cert
-      - ${XRAY_PATH}/log:/var/log/xray
+      # 日志文件映射到统一log目录
+      - ${DOCKER_BOX_HOME}/log/xray_access.log:/var/log/xray/access.log
+      - ${DOCKER_BOX_HOME}/log/xray_error.log:/var/log/xray/error.log
       - /etc/resolv.conf:/etc/resolv.conf
     environment:
       - TZ=Asia/Shanghai

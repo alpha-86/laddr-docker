@@ -12,7 +12,9 @@ services:
       - ${HAPROXY_PATH}/haproxy.cfg.tpl:/usr/local/etc/haproxy/haproxy.cfg.tpl:ro
       - ${HAPROXY_PATH}/entrypoint.sh:/entrypoint.sh:ro
       - ${HAPROXY_PATH}/maps:/usr/local/etc/haproxy/maps:ro
-      - ${HAPROXY_PATH}/log:/var/log/haproxy
+      # 日志文件映射到统一log目录
+      - ${DOCKER_BOX_HOME}/log/haproxy_access.log:/var/log/haproxy/access.log
+      - ${DOCKER_BOX_HOME}/log/haproxy_error.log:/var/log/haproxy/error.log
     environment:
       - TZ=Asia/Shanghai
       - NF_XTLS_SERVER=${NF_XTLS_SERVER}
@@ -30,7 +32,6 @@ services:
     volumes:
       - ${HTML_PATH}:/usr/share/nginx/html
       - ${NGINX_PATH}/www:/var/www
-      - ${NGINX_PATH}/log:/var/log/nginx
       - ${NGINX_PATH}/conf/nginx.conf:/etc/nginx/nginx.conf
       - ${NGINX_PATH}/conf/server_params:/etc/nginx/server_params
       - ${NGINX_PATH}/conf/conf.d:/etc/nginx/conf.d
@@ -38,6 +39,9 @@ services:
       - ${NGINX_PATH}/script:/root/script
       - ${NGINX_PATH}/entrypoint.sh:/entrypoint.sh:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      # 日志文件映射到统一log目录
+      - ${DOCKER_BOX_HOME}/log/nginx_access.log:/var/log/nginx/access.log
+      - ${DOCKER_BOX_HOME}/log/nginx_error.log:/var/log/nginx/error.log
     environment:
       - NGINX_PORT=80
       - TZ=Asia/Shanghai

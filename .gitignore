@@ -19,6 +19,18 @@ nginx/log/*.log
 # Docker volumes
 *.log
 
+# Centralized logs
+log/*.log
+log/
+
+# HAProxy logs
+haproxy/log/*.log
+
+# Temporary files
+/tmp/xray_client_cfg_*.json
+/tmp/client_config_*.json
+/tmp/test_*.json
+
 # Build artifacts
 node_modules/
 .DS_Store
