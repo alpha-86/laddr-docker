@@ -96,7 +96,12 @@ if [ -s "$NEW_VARS_TEMP" ] || [ -s "$CHANGED_VARS_TEMP" ]; then
         echo ""
         echo "新增变量 ($(wc -l < "$NEW_VARS_TEMP" | tr -d ' ')):"
         while IFS='|' read -r var_name default_value; do
-            echo "  - $var_name=$default_value"
+            # 隐藏敏感信息，只显示前3位
+            if [[ "$var_name" =~ ^(Ali_Key|Ali_Secret|CF_Key|XRAY_UUID)$ ]]; then
+                echo "  - $var_name=${default_value:0:3}..."
+            else
+                echo "  - $var_name=$default_value"
+            fi
         done < "$NEW_VARS_TEMP"
     fi
 
@@ -104,7 +109,12 @@ if [ -s "$NEW_VARS_TEMP" ] || [ -s "$CHANGED_VARS_TEMP" ]; then
         echo ""
         echo "值已变更 ($(wc -l < "$CHANGED_VARS_TEMP" | tr -d ' ')):"
         while IFS='|' read -r var_name default_value final_value; do
-            echo "  - $var_name: $default_value -> $final_value"
+            # 隐藏敏感信息，只显示前3位
+            if [[ "$var_name" =~ ^(Ali_Key|Ali_Secret|CF_Key|XRAY_UUID)$ ]]; then
+                echo "  - $var_name: ${default_value:0:3}... -> ${final_value:0:3}..."
+            else
+                echo "  - $var_name: $default_value -> $final_value"
+            fi
         done < "$CHANGED_VARS_TEMP"
     fi
 

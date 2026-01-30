@@ -1,7 +1,6 @@
 #!/bin/bash
-
 # laddr-docker 部署脚本
-# 用途：部署项目到目标服务器
+# 职责：部署代码到远程服务器并启动容器
 
 set -e
 
@@ -37,7 +36,6 @@ get_deployment_config() {
     fi
 }
 
-# 主函数
 main() {
     echo "=========================================="
     echo "  laddr-docker 部署脚本"
@@ -51,43 +49,96 @@ main() {
     echo ""
 
     # 测试连接
-    if ! ssh -o ConnectTimeout=5 "$DEPLOYMENT_SERVER" "echo OK" 2>/dev/null; then
+    log_info "测试 SSH 连接..."
+    if ! ssh -o ConnectTimeout=5 "$DEPLOYMENT_SERVER" "echo OK" >/dev/null 2>&1; then
         log_error "无法连接到服务器 $DEPLOYMENT_SERVER"
         exit 1
     fi
-
-    # 传输文件
-    log_info "正在传输文件..."
-    local project_dir="$(cd "$(dirname "$0")/.." && pwd)"
+    log_success "SSH 连接正常"
 
     # 创建远程目录
+    log_info "创建远程目录..."
     ssh "$DEPLOYMENT_SERVER" "mkdir -p $REMOTE_PATH" 2>/dev/null || true
 
     # 同步文件（排除 .git、.deployment-config、.env 和 scripts）
-    rsync -avz --exclude='.git' --exclude='.deployment-config' --exclude='.env' --exclude='scripts' "$project_dir/" "$DEPLOYMENT_SERVER:$REMOTE_PATH/"
-
-    log_success "文件传输完成"
-
-    # 在目标服务器生成 .env 文件
+    # 排除运行时生成的文件：日志、证书、acme 数据
     echo ""
-    log_info "正在生成 .env 文件..."
-    ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && sh gen_env.sh"
+    log_info "使用 rsync 同步文件..."
+    local project_dir="$(cd "$(dirname "$0")/.." && pwd)"
+    rsync -avz \
+        --exclude='.git' \
+        --exclude='.deployment-config' \
+        --exclude='.env' \
+        --exclude='*/log/' \
+        --exclude='*/ssl/' \
+        --exclude='acme/acme.sh/' \
+        --exclude='xray/etc/config.json' \
+        --exclude='xray/etc/config.status' \
+        "$project_dir/" "$DEPLOYMENT_SERVER:$REMOTE_PATH/" 2>&1 | grep -v "^sending\|^sent\|^total"
+    log_success "文件同步完成"
 
-    # 启动服务
+    # 生成 .env 文件
     echo ""
-    log_info "正在启动服务..."
-    ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && docker compose up -d"
+    log_info "生成 .env 文件..."
+    ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && sh gen_env.sh" 2>&1
+    log_success ".env 文件生成完成"
 
+    # 重启容器
+    echo ""
+    log_info "重启容器..."
+    ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && docker compose stop && docker compose up -d" 2>&1 | grep -v "^$"
+    log_success "容器重启完成"
+
+    # 等待容器初始化
+    echo ""
+    log_info "等待容器初始化（10 秒）..."
+    sleep 10
+
+    # 检查容器状态
+    echo ""
+    log_info "检查容器状态..."
+    local containers=$(ssh "$DEPLOYMENT_SERVER" "docker ps --format '{{.Names}}'" 2>/dev/null)
+    local required=("haproxy" "nginx" "acme" "xray")
+    local all_running=true
+
+    for c in "${required[@]}"; do
+        if echo "$containers" | grep -q "^${c}$"; then
+            log_success "$c 容器运行中"
+        else
+            log_error "$c 容器未运行"
+            all_running=false
+        fi
+    done
+
+    if [ "$all_running" = false ]; then
+        log_error "部分容器未运行，请检查日志"
+        exit 1
+    fi
+
+    echo ""
+    echo "=========================================="
     log_success "部署完成！"
-
+    echo "=========================================="
     echo ""
-    echo "=========================================="
-    log_info "常用命令:"
-    echo "  运行测试: ./scripts/test.sh"
-    echo "  查看容器: ssh $DEPLOYMENT_SERVER 'docker ps'"
-    echo "  查看日志: ssh $DEPLOYMENT_SERVER 'cd $REMOTE_PATH && docker compose logs'"
-    echo "  重启服务: ssh $DEPLOYMENT_SERVER 'cd $REMOTE_PATH && docker compose restart'"
-    echo "=========================================="
+    log_info "下一步：观察服务状态和日志"
+    echo ""
+    echo "建议执行以下命令观察服务："
+    echo ""
+    echo "  # 查看容器状态"
+    echo "  ssh $DEPLOYMENT_SERVER \"cd $REMOTE_PATH && docker ps\""
+    echo ""
+    echo "  # 查看 HAProxy 日志"
+    echo "  ssh $DEPLOYMENT_SERVER \"docker logs haproxy --tail 30\""
+    echo ""
+    echo "  # 查看 Nginx 日志"
+    echo "  ssh $DEPLOYMENT_SERVER \"docker logs nginx --tail 30\""
+    echo ""
+    echo "  # 查看 Xray 日志"
+    echo "  ssh $DEPLOYMENT_SERVER \"docker logs xray --tail 30\""
+    echo ""
+    echo "观察完毕后，运行测试脚本："
+    echo "  ./scripts/test.sh"
+    echo ""
 }
 
 main "$@"

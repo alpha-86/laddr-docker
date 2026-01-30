@@ -16,5 +16,6 @@ done
 
 echo "SSL certificates found, starting nginx..."
 
-# 启动 nginx
-exec /docker-entrypoint.sh "$@"
+# 先运行 /docker-entrypoint.d/ 下的脚本，然后启动 nginx
+/docker-entrypoint.sh 2>/dev/null || true
+exec nginx -g 'daemon off;'

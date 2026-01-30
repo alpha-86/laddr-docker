@@ -2,15 +2,17 @@ services:
   haproxy:
     restart: always
     container_name: haproxy
-    image: haproxy:2.8-alpine
+    image: haproxy:latest
     network_mode: host
+    user: root
     labels:
       - __haproxy__
-    command: sh /entrypoint.sh
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     volumes:
       - ${HAPROXY_PATH}/haproxy.cfg.tpl:/usr/local/etc/haproxy/haproxy.cfg.tpl:ro
       - ${HAPROXY_PATH}/entrypoint.sh:/entrypoint.sh:ro
       - ${HAPROXY_PATH}/maps:/usr/local/etc/haproxy/maps:ro
+      - ${HAPROXY_PATH}/log:/var/log/haproxy
     environment:
       - TZ=Asia/Shanghai
       - NF_XTLS_SERVER=${NF_XTLS_SERVER}
@@ -24,7 +26,7 @@ services:
     network_mode: host
     labels:
       - __nginx__
-    command: sh /entrypoint.sh
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     volumes:
       - ${HTML_PATH}:/usr/share/nginx/html
       - ${NGINX_PATH}/www:/var/www

@@ -1,20 +1,52 @@
 #!/bin/sh
 # HAProxy Entrypoint Script
-# 使用 envsubst 替换配置模板中的环境变量
+set -e
+
+# 检查环境变量并设置默认值
+: "${NF_XTLS_SERVER:=127.0.0.1:18910}"
+
+# 创建日志目录和日志文件
+mkdir -p /var/log/haproxy
+touch /var/log/haproxy/access.log
+touch /var/log/haproxy/error.log
+chmod 666 /var/log/haproxy/access.log
+chmod 666 /var/log/haproxy/error.log
 
 # 模板文件和输出文件路径
-TEMPLATE_FILE="/usr/local/etc/haproxy/haproxy.cfg.tpl"
-OUTPUT_FILE="/tmp/haproxy.cfg"
+TEMPLATE="/usr/local/etc/haproxy/haproxy.cfg.tpl"
+CONFIG="/usr/local/etc/haproxy/haproxy.cfg"
 
-# 使用 envsubst 替换环境变量
-envsubst < "$TEMPLATE_FILE" > "$OUTPUT_FILE"
+# 替换环境变量并生成配置文件
+sed "s/\${NF_XTLS_SERVER}/$NF_XTLS_SERVER/g" "$TEMPLATE" > "$CONFIG"
+
+# 安装 rsyslog
+apt-get update -qq && apt-get install -y rsyslog
+
+# 配置 rsyslog 启用 UDP 监听并处理 HAProxy 日志
+cat > /etc/rsyslog.d/49-haproxy.conf << EOF
+# 启用 UDP 监听
+\$ModLoad imudp
+\$UDPServerRun 514
+\$UDPServerAddress 127.0.0.1
+
+# 禁用文件同步延迟，实时写入
+\$ActionFileDefaultTemplate RSYSLOG_TraditionalFileFormat
+\$ActionFileEnableSync on
+\$OMFileFlushInterval 1
+
+# HAProxy 日志配置（实时写入，无缓冲）
+local0.*    /var/log/haproxy/access.log;RSYSLOG_TraditionalFileFormat
+& stop
+EOF
+
+# 启动 rsyslog
+rsyslogd
+
+# 等待 rsyslog 启动
+sleep 2
 
 # 验证配置文件语法
-haproxy -c -f "$OUTPUT_FILE"
-if [ $? -ne 0 ]; then
-    echo "ERROR: HAProxy configuration syntax error"
-    exit 1
-fi
+haproxy -c -f "$CONFIG"
 
 # 启动 HAProxy
-exec haproxy -f "$OUTPUT_FILE"
+exec haproxy -f "$CONFIG"
