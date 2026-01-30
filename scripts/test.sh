@@ -434,7 +434,15 @@ test_case_5() {
       "tag": "socks",
       "port": 11080,
       "listen": "127.0.0.1",
-      "protocol": "socks"
+      "protocol": "socks",
+      "settings": {
+        "userLevel": 0
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"],
+        "metadataOnly": false
+      }
     }
   ],
   "outbounds": [
