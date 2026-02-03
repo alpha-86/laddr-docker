@@ -39,6 +39,10 @@ backend xray_backend
     # Send proxy protocol v2 to preserve client IP
     server xray 127.0.0.1:18910 send-proxy-v2
 
+backend xhttp_backend
+    # Send proxy protocol v2 to preserve client IP
+    server xray-xhttp 127.0.0.1:18911 send-proxy-v2
+
 backend ngx_backend
     # Send proxy protocol v2 to preserve client IP
     server ngx 127.0.0.1:8443 send-proxy-v2

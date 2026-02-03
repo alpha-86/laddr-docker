@@ -4,6 +4,9 @@
 # Xray backends: x|xyz|api|dt|ai prefixes (4th level subdomain) / Xray 后端：匹配第四级域名为 x|xyz|api|dt|ai
 ^(x|xyz|api|dt|ai)\.[^.]+\.[^.]+\.[^.]+$ xray_backend
 
+# Xray XHTTP backends: web|app|cdn prefixes (4th level subdomain) / Xray XHTTP 后端：匹配第四级域名为 web|app|cdn
+^(web|app|cdn)\.[^.]+\.[^.]+\.[^.]+$ xhttp_backend
+
 # Netflix Xray backends: nf|netflix|nfx|nfv prefixes (4th level subdomain) / Netflix Xray 后端：匹配第四级域名为 nf|netflix|nfx|nfv
 ^(nf|netflix|nfx|nfv)\.[^.]+\.[^.]+\.[^.]+$ nf_xtls_backend
 

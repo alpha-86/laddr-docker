@@ -97,21 +97,56 @@ main() {
     # 检查容器状态
     echo ""
     log_info "检查容器状态..."
-    local containers=$(ssh "$DEPLOYMENT_SERVER" "docker ps --format '{{.Names}}'" 2>/dev/null)
+
+    # 获取详细的容器状态信息
+    local container_status=$(ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" 2>/dev/null)
+    echo "$container_status"
+    echo ""
+
+    # 检查每个必需容器的运行状态
     local required=("haproxy" "nginx" "acme" "xray")
-    local all_running=true
+    local all_healthy=true
+    local failed_containers=()
 
     for c in "${required[@]}"; do
-        if echo "$containers" | grep -q "^${c}$"; then
-            log_success "$c 容器运行中"
+        # 检查容器是否在运行（Up状态）
+        local status=$(ssh "$DEPLOYMENT_SERVER" "docker ps --filter name=^${c}$ --format '{{.Status}}'" 2>/dev/null)
+
+        if [[ "$status" =~ ^Up.*$ ]]; then
+            log_success "$c 容器运行正常"
         else
-            log_error "$c 容器未运行"
-            all_running=false
+            # 检查是否是重启状态
+            local full_status=$(ssh "$DEPLOYMENT_SERVER" "docker ps -a --filter name=^${c}$ --format '{{.Status}}'" 2>/dev/null)
+
+            if [[ "$full_status" =~ Restarting.*$ ]]; then
+                log_error "$c 容器处于重启循环状态: $full_status"
+                failed_containers+=("$c")
+                all_healthy=false
+            elif [[ "$full_status" =~ Exited.*$ ]]; then
+                log_error "$c 容器已退出: $full_status"
+                failed_containers+=("$c")
+                all_healthy=false
+            else
+                log_error "$c 容器状态异常: $full_status"
+                failed_containers+=("$c")
+                all_healthy=false
+            fi
         fi
     done
 
-    if [ "$all_running" = false ]; then
-        log_error "部分容器未运行，请检查日志"
+    # 如果有容器失败，显示详细错误信息并退出
+    if [ "$all_healthy" = false ]; then
+        echo ""
+        log_error "部署失败！以下容器状态异常:"
+        for failed_container in "${failed_containers[@]}"; do
+            echo ""
+            log_error "=== $failed_container 容器日志 (最近20行) ==="
+            ssh "$DEPLOYMENT_SERVER" "docker logs $failed_container --tail 20" 2>&1 | while IFS= read -r line; do
+                echo "  $line"
+            done
+        done
+        echo ""
+        log_error "请检查上述容器日志，解决问题后重新部署"
         exit 1
     fi
 

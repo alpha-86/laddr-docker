@@ -18,6 +18,26 @@ gen_uuid() {
     fi
 }
 
+# Reality密钥对生成函数（静默生成，不输出调试信息）
+gen_reality_keypair() {
+    # 尝试使用docker生成标准的X25519密钥对
+    if command -v docker >/dev/null 2>&1; then
+        local keypair_output=$(docker run --rm teddysun/xray xray x25519 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$keypair_output" ]; then
+            # 只输出结果，不输出调试信息
+            echo "$keypair_output"
+            return 0
+        fi
+    fi
+
+    # 备用方案：使用openssl生成兼容的密钥
+    local private_key=$(openssl rand -base64 32 2>/dev/null | tr -d '=\n')
+    local public_key=$(openssl rand -base64 32 2>/dev/null | tr -d '=\n')
+    # 输出格式与xray x25519保持一致
+    echo "PrivateKey: $private_key"
+    echo "Password: $public_key"
+}
+
 # 读取现有 .env 文件
 EXISTING_VARS_TEMP=$(mktemp)
 if [ -f "$ENV_FILE" ]; then
@@ -39,6 +59,24 @@ var_exists() {
     grep -q "^$1=" "$EXISTING_VARS_TEMP" 2>/dev/null
 }
 
+# Reality配置生成（静默生成，仅用于内部处理）
+generate_reality_config() {
+    local main_uuid=$(get_existing_value "XRAY_UUID" || gen_uuid)
+
+    # 静默生成密钥对
+    local keypair_output=$(gen_reality_keypair)
+    local private_key=$(echo "$keypair_output" | grep "PrivateKey:" | awk '{print $2}')
+    local public_key=$(echo "$keypair_output" | grep "Password:" | awk '{print $2}')
+
+    # 生成4字符shortId
+    local short_id=$(openssl rand -hex 2 2>/dev/null || echo "a1b2")
+
+    # 仅输出变量定义，不输出调试信息
+    echo "REALITY_PRIVATE_KEY=${private_key}"
+    echo "REALITY_PUBLIC_KEY=${public_key}"
+    echo "REALITY_SHORT_IDS=[\"${short_id}\"]"
+}
+
 # 定义所有变量及其默认值（按输出顺序）
 # 格式: "变量名|默认值|分块标题"
 VARS=(
@@ -58,7 +96,13 @@ VARS=(
     "CA_LETSENCRYPT|1|"
     "DOMAIN_LIST||"
     "XRAY_UUID|$(gen_uuid)|#xray"
+    "XRAY_UUID_9000|$(get_existing_value "XRAY_UUID" || gen_uuid)|"
+    "XRAY_UUID_9001|$(get_existing_value "XRAY_UUID" || gen_uuid)|"
     "NF_XTLS_SERVER|127.0.0.1:18910|#haproxy"
+    "REALITY_PRIVATE_KEY|$(generate_reality_config | grep REALITY_PRIVATE_KEY | cut -d'=' -f2)|#reality"
+    "REALITY_PUBLIC_KEY|$(generate_reality_config | grep REALITY_PUBLIC_KEY | cut -d'=' -f2)|"
+    "REALITY_SHORT_IDS|$(generate_reality_config | grep REALITY_SHORT_IDS | cut -d'=' -f2)|"
+    "REALITY_DEST|www.google.com:443|"
 )
 
 # 记录新增变量和修改的变量
@@ -97,7 +141,7 @@ if [ -s "$NEW_VARS_TEMP" ] || [ -s "$CHANGED_VARS_TEMP" ]; then
         echo "新增变量 ($(wc -l < "$NEW_VARS_TEMP" | tr -d ' ')):"
         while IFS='|' read -r var_name default_value; do
             # 隐藏敏感信息，只显示前3位
-            if [[ "$var_name" =~ ^(Ali_Key|Ali_Secret|CF_Key|XRAY_UUID)$ ]]; then
+            if [[ "$var_name" =~ ^(Ali_Key|Ali_Secret|CF_Key|XRAY_UUID|XRAY_UUID_9000|XRAY_UUID_9001|REALITY_PRIVATE_KEY|REALITY_PUBLIC_KEY)$ ]]; then
                 echo "  - $var_name=${default_value:0:3}..."
             else
                 echo "  - $var_name=$default_value"
@@ -110,7 +154,7 @@ if [ -s "$NEW_VARS_TEMP" ] || [ -s "$CHANGED_VARS_TEMP" ]; then
         echo "值已变更 ($(wc -l < "$CHANGED_VARS_TEMP" | tr -d ' ')):"
         while IFS='|' read -r var_name default_value final_value; do
             # 隐藏敏感信息，只显示前3位
-            if [[ "$var_name" =~ ^(Ali_Key|Ali_Secret|CF_Key|XRAY_UUID)$ ]]; then
+            if [[ "$var_name" =~ ^(Ali_Key|Ali_Secret|CF_Key|XRAY_UUID|XRAY_UUID_9000|XRAY_UUID_9001|REALITY_PRIVATE_KEY|REALITY_PUBLIC_KEY)$ ]]; then
                 echo "  - $var_name: ${default_value:0:3}... -> ${final_value:0:3}..."
             else
                 echo "  - $var_name: $default_value -> $final_value"

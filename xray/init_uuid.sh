@@ -35,6 +35,11 @@ if [ -z "$XRAY_UUID_9000" ]; then
     XRAY_UUID_9000=$XRAY_UUID
 fi
 
+# 如果 XRAY_UUID_9001 未定义，则使用主 UUID
+if [ -z "$XRAY_UUID_9001" ]; then
+    XRAY_UUID_9001=$XRAY_UUID
+fi
+
 # 设置默认 DNS 服务器
 if [ -z "$DEFAULT_DNS_SERVER1" ]; then
     DEFAULT_DNS_SERVER1="8.8.8.8"
@@ -45,22 +50,29 @@ if [ -z "$NF_DNS_SERVER" ]; then
     NF_DNS_SERVER=$DEFAULT_DNS_SERVER1
 fi
 
-# 基于模板生成配置文件 - 支持 XTLS-RPRX-Vision (端口9000)
+# 基于模板生成配置文件 - 支持 XTLS-RPRX-Vision (端口9000) 和 XHTTP-Reality (端口9001)
 cat "$XRAY_CONFIG_TPL" | sed "s/\${XRAY_UUID}/${XRAY_UUID}/g" \
                              | sed "s/\${XRAY_UUID_9000}/${XRAY_UUID_9000}/g" \
+                             | sed "s/\${XRAY_UUID_9001}/${XRAY_UUID_9001}/g" \
                              | sed "s/\${DEFAULT_DNS_SERVER1}/${DEFAULT_DNS_SERVER1}/g" \
                              | sed "s/\${DEFAULT_DNS_SERVER2}/${DEFAULT_DNS_SERVER2}/g" \
                              | sed "s/\${NF_DNS_SERVER}/${NF_DNS_SERVER}/g" \
+                             | sed "s/\${REALITY_PRIVATE_KEY}/${REALITY_PRIVATE_KEY}/g" \
+                             | sed "s|\${REALITY_DEST}|${REALITY_DEST}|g" \
+                             | sed "s|\${REALITY_SHORT_IDS}|${REALITY_SHORT_IDS}|g" \
                               > "$XRAY_CONFIG_FILE"
 
 # 输出状态信息，包含时间戳
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Generated config.json from TPL{" >> "$XRAY_CONFIG_STATUS"
 echo "    XRAY_CONFIG_TPL:[${XRAY_CONFIG_TPL}]" >> "$XRAY_CONFIG_STATUS"
-echo "    XRAY_UUID:[${XRAY_UUID}]" >> "$XRAY_CONFIG_STATUS"
-echo "    XRAY_UUID_9000:[${XRAY_UUID_9000}]" >> "$XRAY_CONFIG_STATUS"
+echo "    XRAY_UUID:[${XRAY_UUID:0:8}...]" >> "$XRAY_CONFIG_STATUS"
+echo "    XRAY_UUID_9000:[${XRAY_UUID_9000:0:8}...]" >> "$XRAY_CONFIG_STATUS"
+echo "    XRAY_UUID_9001:[${XRAY_UUID_9001:0:8}...]" >> "$XRAY_CONFIG_STATUS"
 echo "    DEFAULT_DNS_SERVER1:[${DEFAULT_DNS_SERVER1}]" >> "$XRAY_CONFIG_STATUS"
 echo "    DEFAULT_DNS_SERVER2:[${DEFAULT_DNS_SERVER2}]" >> "$XRAY_CONFIG_STATUS"
 echo "    NF_DNS_SERVER:[${NF_DNS_SERVER}]" >> "$XRAY_CONFIG_STATUS"
+echo "    REALITY_PRIVATE_KEY:[${REALITY_PRIVATE_KEY:0:8}...]" >> "$XRAY_CONFIG_STATUS"
+echo "    REALITY_SHORT_IDS:[${REALITY_SHORT_IDS}]" >> "$XRAY_CONFIG_STATUS"
 echo "}END" >> "$XRAY_CONFIG_STATUS"
 
 # 执行 xray

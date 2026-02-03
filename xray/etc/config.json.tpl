@@ -44,6 +44,44 @@
           "tls"
         ]
       }
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 9001,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${XRAY_UUID_9001}",
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "xhttpSettings": {
+          "path": "/js/app.js",
+          "host": "www.google.com"
+        },
+        "realitySettings": {
+          "show": false,
+          "dest": "${REALITY_DEST}",
+          "xver": 2,
+          "serverNames": ["www.google.com"],
+          "privateKey": "${REALITY_PRIVATE_KEY}",
+          "shortIds": ${REALITY_SHORT_IDS}
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
     }
   ],
   "outbounds": [

@@ -6,6 +6,7 @@ services:
     command: sh /init_uuid.sh
     ports:
       - 18910:9000
+      - 18911:9001
     volumes:
       - ${XRAY_PATH}/init_uuid.sh:/init_uuid.sh
       - ${XRAY_PATH}/etc:/etc/xray
@@ -19,5 +20,10 @@ services:
       - XRAY_UUID=${XRAY_UUID}
       - XRAY_CONF_SUFFIX=${XRAY_CONF_SUFFIX}
       - XRAY_UUID_9000=${XRAY_UUID_9000}
+      - XRAY_UUID_9001=${XRAY_UUID_9001}
+      - REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
+      - REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
+      - REALITY_SHORT_IDS=${REALITY_SHORT_IDS}
+      - REALITY_DEST=${REALITY_DEST}
     networks:
       - default
