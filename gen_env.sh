@@ -1,11 +1,25 @@
 #!/bin/bash
 
 # laddr-docker 环境变量生成脚本
-# 用途：生成或更新 .env 配置文件
+# 用途：初始化目录结构并生成或更新 .env 配置文件
 
 # 获取脚本所在目录
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 ENV_FILE="$SCRIPT_DIR/.env"
+
+# 初始化目录结构
+echo "=========================================="
+echo "初始化目录结构"
+echo "=========================================="
+mkdir -p nginx/conf nginx/www nginx/ssl
+mkdir -p html
+mkdir -p haproxy/maps
+mkdir -p acme/acme.sh
+mkdir -p xray/etc
+mkdir -p log
+
+echo "目录结构初始化完成"
+echo ""
 
 # UUID 生成函数
 gen_uuid() {

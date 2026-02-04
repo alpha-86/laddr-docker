@@ -89,8 +89,7 @@ Logging (Centralized)
 /laddr-docker/
 ├── docker-compose.yml              # Main service definitions
 ├── docker-compose-xray.yml         # Xray-specific service definition
-├── gen_env.sh                      # Environment variable generator
-├── init.sh                         # Directory initialization script
+├── gen_env.sh                      # Environment setup (creates dirs + generates .env)
 ├── .env                            # Environment configuration (generated)
 ├── .deployment-config              # Deployment server configuration
 │
@@ -489,9 +488,8 @@ docker-compose down && docker-compose up -d
 
 ### 1. Local Development
 1. **Clone Repository**: `git clone [repository]`
-2. **Generate Environment**: `./gen_env.sh`
-3. **Initialize Directories**: `./init.sh`
-4. **Start Services**: `docker-compose up -d`
+2. **Initialize Environment**: `./gen_env.sh` (creates directories + generates .env)
+3. **Start Services**: `docker-compose up -d`
 
 ### 2. Testing Changes
 1. **Run Local Tests**: `./scripts/test.sh`
