@@ -4,6 +4,7 @@ set -e
 
 # 检查环境变量并设置默认值
 : "${NF_XTLS_SERVER:=127.0.0.1:18910}"
+: "${REALITY_DEST:?REALITY_DEST environment variable is required}"
 
 # 创建日志目录和日志文件
 mkdir -p /var/log/haproxy
@@ -15,9 +16,16 @@ chmod 666 /var/log/haproxy/error.log
 # 模板文件和输出文件路径
 TEMPLATE="/usr/local/etc/haproxy/haproxy.cfg.tpl"
 CONFIG="/usr/local/etc/haproxy/haproxy.cfg"
+SNI_MAP_TEMPLATE="/usr/local/etc/haproxy/maps/sni_routing.map.tpl"
+SNI_MAP="/usr/local/etc/haproxy/maps/sni_routing.map"
 
 # 替换环境变量并生成配置文件
 sed "s/\${NF_XTLS_SERVER}/$NF_XTLS_SERVER/g" "$TEMPLATE" > "$CONFIG"
+
+# 替换 SNI routing map 中的 REALITY_DEST 变量
+# 需要转义正则表达式中的特殊字符（点号）
+REALITY_DEST_ESCAPED=$(echo "$REALITY_DEST" | sed 's/\./\\./g')
+sed "s/\${REALITY_DEST}/$REALITY_DEST_ESCAPED/g" "$SNI_MAP_TEMPLATE" > "$SNI_MAP"
 
 # 安装 rsyslog
 apt-get update -qq && apt-get install -y rsyslog

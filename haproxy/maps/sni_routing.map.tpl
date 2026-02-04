@@ -4,6 +4,9 @@
 # Xray backends: x|xyz|api|dt|ai prefixes (4th level subdomain) / Xray 后端：匹配第四级域名为 x|xyz|api|dt|ai
 ^(x|xyz|api|dt|ai)\.[^.]+\.[^.]+\.[^.]+$ xray_backend
 
+# Xray XHTTP+REALITY backend: REALITY_DEST (external website for REALITY) / Xray XHTTP+REALITY 后端：REALITY_DEST（REALITY伪装目标网站）
+^${REALITY_DEST}$ xhttp_backend
+
 # Xray XHTTP backends: web|app|cdn prefixes (4th level subdomain) / Xray XHTTP 后端：匹配第四级域名为 web|app|cdn
 ^(web|app|cdn)\.[^.]+\.[^.]+\.[^.]+$ xhttp_backend
 

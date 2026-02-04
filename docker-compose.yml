@@ -11,13 +11,14 @@ services:
     volumes:
       - ${HAPROXY_PATH}/haproxy.cfg.tpl:/usr/local/etc/haproxy/haproxy.cfg.tpl:ro
       - ${HAPROXY_PATH}/entrypoint.sh:/entrypoint.sh:ro
-      - ${HAPROXY_PATH}/maps:/usr/local/etc/haproxy/maps:ro
+      - ${HAPROXY_PATH}/maps:/usr/local/etc/haproxy/maps:rw
       # 日志文件映射到统一log目录
       - ${DOCKER_BOX_HOME}/log/haproxy_access.log:/var/log/haproxy/access.log
       - ${DOCKER_BOX_HOME}/log/haproxy_error.log:/var/log/haproxy/error.log
     environment:
       - TZ=Asia/Shanghai
       - NF_XTLS_SERVER=${NF_XTLS_SERVER}
+      - REALITY_DEST=${REALITY_DEST}
     depends_on:
       - nginx
 

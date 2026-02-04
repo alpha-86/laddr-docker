@@ -40,8 +40,8 @@ backend xray_backend
     server xray 127.0.0.1:18910 send-proxy-v2
 
 backend xhttp_backend
-    # Send proxy protocol v2 to preserve client IP
-    server xray-xhttp 127.0.0.1:18911 send-proxy-v2
+    # XHTTP+REALITY doesn't support proxy protocol, direct TCP passthrough
+    server xray-xhttp 127.0.0.1:18911
 
 backend ngx_backend
     # Send proxy protocol v2 to preserve client IP

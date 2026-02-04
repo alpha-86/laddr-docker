@@ -993,13 +993,14 @@ test_case_6() {
     echo "=========================================="
     echo ""
 
-    if [ -z "$XHTTP_TEST_DOMAIN" ]; then
-        test_fail "未找到 XHTTP 测试域名"
-        return 1
+    # XHTTP+REALITY使用REALITY_DEST作为SNI和serverName，不使用证书域名
+    local dest_domain=$(remote_cmd "grep '^REALITY_DEST=' .env | cut -d'=' -f2" 2>/dev/null)
+    if [ -z "$dest_domain" ]; then
+        dest_domain="www.fifa.com"  # 默认值
     fi
 
-    log_info "测试域名: $XHTTP_TEST_DOMAIN → xhttp_backend"
-    log_info "脚本构造的测试域名: $XHTTP_TEST_DOMAIN"
+    log_info "XHTTP+REALITY 测试域名: $dest_domain (REALITY伪装目标)"
+    log_info "注意：XHTTP+REALITY使用外部网站域名，不使用证书域名"
 
     # 在宿主机启动 Xray XHTTP 客户端进行 SOCKS5 代理测试
     log_info "在宿主机启动 Xray XHTTP 客户端进行 SOCKS5 代理测试..."
@@ -1038,7 +1039,7 @@ test_case_6() {
 
     # 清理变量，确保没有换行符
     local clean_uuid=$(echo "$xray_uuid" | tr -d '\r\n' | sed 's/[[:space:]]*$//')
-    local clean_domain=$(echo "$XHTTP_TEST_DOMAIN" | tr -d '\r\n' | sed 's/[[:space:]]*$//')
+    local clean_domain="$dest_domain"
 
     log_info "XHTTP客户端配置将使用域名: $clean_domain"
     log_info "XHTTP客户端配置将使用UUID: ${clean_uuid:0:8}...${clean_uuid: -4}"
@@ -1094,13 +1095,12 @@ test_case_6() {
         "network": "xhttp",
         "security": "reality",
         "xhttpSettings": {
-          "path": "/js/app.js",
-          "host": "www.google.com"
+          "path": "/js/app.js"
         },
         "realitySettings": {
           "show": false,
           "fingerprint": "chrome",
-          "serverName": "www.google.com",
+          "serverName": "$clean_domain",
           "publicKey": "$reality_public_key",
           "shortId": "$first_short_id"
         }
@@ -1209,14 +1209,19 @@ EOF
     # 使用宿主机的curl通过SOCKS5代理请求Google
     log_info "通过 SOCKS5 代理（XHTTP协议）请求 www.google.com..."
 
-    # 在远程服务器记录时间并执行curl，同时获取HTTP Date头（避免本地远程延时导致的时间偏差）
+    # 在远程服务器记录时间并执行curl，curl成功后立即关闭Xray客户端让HAProxy写入日志
     local test_result=$(remote_cmd "
         test_time=\$(date +%H:%M:%S)
         curl_output=\$(timeout 15 curl -s --socks5 127.0.0.1:11081 -D /tmp/curl_headers_xhttp.tmp -w '%{http_code}' -o /dev/null https://www.google.com 2>&1)
+        curl_exit_code=\$?
         proxy_result=\$(echo \"\$curl_output\" | grep -o '[0-9][0-9][0-9]' | tail -1)
-        http_date=\$(grep -i '^date:' /tmp/curl_headers_xhttp.tmp 2>/dev/null | cut -d' ' -f2- | tr -d '\r\n' || echo 'N/A')
+        http_date=\$(grep -i '^date:' /tmp/curl_headers_xhttp.tmp 2>/dev/null | cut -d' ' -f2- | tr -d '\r\n' || echo '')
+        # 输出结果
         echo \"\$test_time|\$proxy_result|\$http_date\"
         rm -f /tmp/curl_headers_xhttp.tmp
+        # curl执行完成后立即关闭Xray客户端，让HAProxy写入日志（XHTTP使用长连接）
+        pkill -f 'xray run -c client_config.json' 2>/dev/null || true
+        sleep 3  # 等待HAProxy写入日志
     ")
     local test_start_time=$(echo "$test_result" | cut -d'|' -f1)
     local proxy_result=$(echo "$test_result" | cut -d'|' -f2)
@@ -1297,11 +1302,14 @@ EOF
         fi
 
         # 2. 检查 HAProxy 日志（SNI路由）- 使用新的基准时间前后2秒查找
+        # 注意：XHTTP+REALITY使用REALITY_DEST作为SNI，而不是证书域名
+        local expected_sni="$dest_domain"
         log_info "2. 检查 HAProxy SNI 路由日志（XHTTP后端）（$new_base_time 前后2秒）..."
+        log_info "   期望的SNI: $expected_sni (REALITY伪装目标)"
         local haproxy_log=$(remote_cmd "
             base_time='$new_base_time'
             # 获取最近的日志记录，检查时间是否接近基准时间
-            grep 'sni:$XHTTP_TEST_DOMAIN' log/haproxy_access.log | while read line; do
+            grep 'sni:$expected_sni' log/haproxy_access.log | while read line; do
                 log_time=\$(echo \"\$line\" | grep -o '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]')
                 if [ -n \"\$log_time\" ]; then
                     # 将时间转换为秒数进行比较
@@ -1323,10 +1331,10 @@ EOF
                 # 提取实际的SNI域名用于验证
                 local actual_sni=$(echo "$haproxy_log" | grep -o 'sni:[^[:space:]]*' | cut -d':' -f2)
                 log_info "  实际SNI域名: $actual_sni"
-                if [ "$actual_sni" = "$XHTTP_TEST_DOMAIN" ]; then
-                    log_info "  ✓ SNI域名完全匹配构造的测试域名"
+                if [ "$actual_sni" = "$expected_sni" ]; then
+                    log_info "  ✓ SNI域名完全匹配REALITY伪装目标: $expected_sni"
                 else
-                    log_info "  ❌ SNI域名不匹配构造的测试域名"
+                    log_info "  ❌ SNI域名不匹配REALITY伪装目标"
                     validation_failed=true
                     failure_reasons+=("SNI域名不匹配")
                 fi
@@ -1338,7 +1346,7 @@ EOF
         else
             validation_failed=true
             failure_reasons+=("HAProxy未找到精确匹配的SNI路由日志")
-            log_info "  ❌ HAProxy 未找到 SNI: $XHTTP_TEST_DOMAIN 的路由日志"
+            log_info "  ❌ HAProxy 未找到 SNI: $expected_sni 的路由日志"
         fi
 
         # 3. 检查 Xray 服务端日志（XHTTP代理处理）- 使用新的基准时间前后2秒查找
@@ -1410,15 +1418,15 @@ EOF
             printf "%-15s %-12s %-25s %-10s\n" "测试开始" "$test_start_time" "www.google.com" "✓"
             printf "%-15s %-12s %-25s %-10s\n" "HTTP响应" "${http_date_short:-N/A}" "www.google.com" "✓"
             printf "%-15s %-12s %-25s %-10s\n" "Xray客户端" "${xray_client_time:-N/A}" "www.google.com" "$([ -n "$xray_client_time" ] && echo "✓" || echo "❌")"
-            printf "%-15s %-12s %-25s %-10s\n" "HAProxy路由" "${haproxy_time:-N/A}" "${actual_sni:-N/A}" "$([ "$actual_sni" = "$XHTTP_TEST_DOMAIN" ] && echo "✓" || echo "❌")"
+            printf "%-15s %-12s %-25s %-10s\n" "HAProxy路由" "${haproxy_time:-N/A}" "${actual_sni:-N/A}" "$([ "$actual_sni" = "$expected_sni" ] && echo "✓" || echo "❌")"
             printf "%-15s %-12s %-25s %-10s\n" "Xray服务端" "${xray_server_time:-N/A}" "www.google.com" "$(echo "$xray_server_log" | grep -q "www.google.com\|142.251" && echo "✓" || echo "❌")"
             log_info "=========================================="
 
             # 显示验证结果摘要
             log_info "验证摘要:"
-            log_info "  构造域名: $XHTTP_TEST_DOMAIN"
+            log_info "  REALITY伪装目标: $expected_sni"
             log_info "  实际SNI: ${actual_sni:-未找到}"
-            log_info "  域名匹配: $([ "$actual_sni" = "$XHTTP_TEST_DOMAIN" ] && echo "✓ 完全匹配" || echo "❌ 不匹配")"
+            log_info "  域名匹配: $([ "$actual_sni" = "$expected_sni" ] && echo "✓ 完全匹配" || echo "❌ 不匹配")"
             log_info "  时间窗口: $([ "$time_diff" -le 2 ] 2>/dev/null && echo "✓ 在2秒内" || echo "❌ 超出范围")"
             log_info "  协议类型: XHTTP + REALITY"
         else

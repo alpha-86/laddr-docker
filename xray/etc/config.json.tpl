@@ -52,8 +52,7 @@
       "settings": {
         "clients": [
           {
-            "id": "${XRAY_UUID_9001}",
-            "flow": ""
+            "id": "${XRAY_UUID_9001}"
           }
         ],
         "decryption": "none"
@@ -62,14 +61,12 @@
         "network": "xhttp",
         "security": "reality",
         "xhttpSettings": {
-          "path": "/js/app.js",
-          "host": "www.google.com"
+          "path": "/js/app.js"
         },
         "realitySettings": {
           "show": false,
-          "dest": "${REALITY_DEST}",
-          "xver": 2,
-          "serverNames": ["www.google.com"],
+          "target": "${REALITY_DEST}:443",
+          "serverNames": ["${REALITY_DEST}"],
           "privateKey": "${REALITY_PRIVATE_KEY}",
           "shortIds": ${REALITY_SHORT_IDS}
         }

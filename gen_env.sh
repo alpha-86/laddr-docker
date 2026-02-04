@@ -102,7 +102,7 @@ VARS=(
     "REALITY_PRIVATE_KEY|$(generate_reality_config | grep REALITY_PRIVATE_KEY | cut -d'=' -f2)|#reality"
     "REALITY_PUBLIC_KEY|$(generate_reality_config | grep REALITY_PUBLIC_KEY | cut -d'=' -f2)|"
     "REALITY_SHORT_IDS|$(generate_reality_config | grep REALITY_SHORT_IDS | cut -d'=' -f2)|"
-    "REALITY_DEST|www.google.com:443|"
+    "REALITY_DEST|www.fifa.com|"
 )
 
 # 记录新增变量和修改的变量

@@ -135,6 +135,26 @@ Logging (Centralized)
 
 ## Claude Code Integration
 
+### Network Configuration
+
+#### Proxy Settings for Web Access
+All web queries and external network access should use the configured proxy:
+
+```bash
+export http_proxy=http://127.0.0.1:1087
+export https_proxy=http://127.0.0.1:1087
+export ALL_PROXY=socks5://127.0.0.1:1080
+```
+
+**CRITICAL REMINDER**:
+- **USE Google Search Script**: `/Users/chenchao/Documents/code/laddr-docker/.claude/agents/google-search.sh "search query"` - This script automatically handles proxy settings
+- **NEVER use WebSearch tool directly** - It will fail without proper proxy configuration
+- **For WebFetch operations** - Set proxy environment variables first using Bash tool
+- **Environment Variables Location** - .env file is on the SERVER, not local machine. Use SSH to access server files
+- **Google Script Location**: `.claude/agents/google-search.sh` (moved from project root to proper location)
+
+**Important**: These proxy settings must be applied before any WebSearch, WebFetch, or external network operations to ensure proper connectivity through the local proxy infrastructure.
+
 ### Configuration Files
 
 #### `.claude/settings.local.json`
@@ -297,7 +317,7 @@ XRAY_UUID_9001=port_specific_uuid
 REALITY_PRIVATE_KEY=x25519_private_key
 REALITY_PUBLIC_KEY=x25519_public_key
 REALITY_SHORT_IDS=["short_id_array"]
-REALITY_DEST=destination_spoofing_target
+REALITY_DEST=www.fifa.com
 ```
 
 ## Operational Procedures
