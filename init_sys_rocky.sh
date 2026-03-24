@@ -165,6 +165,16 @@ firewall-cmd --list-all
 
 systemctl restart docker
 
+# 克隆 laddr-docker 项目到 work 用户目录
+echo ""
+echo "正在克隆 laddr-docker 项目到 /home/work/ 目录..."
+if [[ -d /home/work/laddr-docker ]]; then
+    echo "laddr-docker 目录已存在，跳过克隆"
+else
+    su - work -c "git clone -b b1 https://github.com/alpha-86/laddr-docker.git /home/work/laddr-docker"
+    echo "laddr-docker 项目已克隆到 /home/work/laddr-docker"
+fi
+
 echo ""
 echo "=== 系统初始化完成 ==="
 echo "主机名: $host_name"

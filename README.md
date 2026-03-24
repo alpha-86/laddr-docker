@@ -37,6 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/alpha-86/laddr-docker/main/init_sys
 | SSH | 配置公钥登录，禁止 root 登录，禁止密码登录，只允许 work 用户 |
 | sudoers | 配置 work 用户 sudo 权限（含 dnf 免密） |
 | 防火墙 | 开放 80/tcp, 443/tcp 端口 |
+| 项目克隆 | 克隆 laddr-docker b1 分支到 /home/work/laddr-docker |
 
 **初始化完成后：**
 
