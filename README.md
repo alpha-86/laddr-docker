@@ -23,9 +23,7 @@ rsyslog → 集中式日志收集
 
 ```bash
 # 下载并执行初始化脚本
-curl -fsSL https://raw.githubusercontent.com/your-repo/laddr-docker/main/init_sys_rocky.sh -o init_sys_rocky.sh
-chmod +x init_sys_rocky.sh
-sudo ./init_sys_rocky.sh
+curl -fsSL https://raw.githubusercontent.com/alpha-86/laddr-docker/main/init_sys_rocky.sh | bash
 ```
 
 **初始化脚本功能：**
