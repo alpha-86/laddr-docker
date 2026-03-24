@@ -171,8 +171,14 @@ echo "正在克隆 laddr-docker 项目到 /home/work/ 目录..."
 if [[ -d /home/work/laddr-docker ]]; then
     echo "laddr-docker 目录已存在，跳过克隆"
 else
-    su - work -c "git clone -b b1 https://github.com/alpha-86/laddr-docker.git /home/work/laddr-docker"
-    echo "laddr-docker 项目已克隆到 /home/work/laddr-docker"
+    # 优先尝试 HTTPS，失败则使用 SSH
+    if su - work -c "git clone -b b1 https://github.com/alpha-86/laddr-docker.git /home/work/laddr-docker" 2>/dev/null; then
+        echo "laddr-docker 项目已克隆（HTTPS）"
+    else
+        echo "HTTPS 克隆失败，尝试 SSH..."
+        su - work -c "git clone -b b1 git@github.com:alpha-86/laddr-docker.git /home/work/laddr-docker"
+        echo "laddr-docker 项目已克隆（SSH）"
+    fi
 fi
 
 echo ""
