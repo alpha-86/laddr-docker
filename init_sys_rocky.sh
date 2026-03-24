@@ -181,9 +181,32 @@ else
     fi
 fi
 
+# 配置虚拟内存(swap)
+SWAP_SIZE="8G"
+SWAP_FILE="/swapfile"
+if [[ ! -f "$SWAP_FILE" ]]; then
+    fallocate -l $SWAP_SIZE $SWAP_FILE
+    chmod 600 $SWAP_FILE
+    mkswap $SWAP_FILE
+    swapon $SWAP_FILE
+    echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    echo "已创建 ${SWAP_SIZE} swap文件"
+else
+    echo "swap文件已存在，跳过"
+fi
+
+# 配置sysctl参数（重启后生效）
+sysctl -w vm.swappiness=10
+sysctl -w vm.vfs_cache_pressure=50
+echo "vm.swappiness=10" >> /etc/sysctl.conf
+echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.conf
+echo "vm.swappiness 和 vm.vfs_cache_pressure 已配置并持久化"
+
 echo ""
 echo "=== 系统初始化完成 ==="
 echo "主机名: $host_name"
 echo "work用户已创建并配置完成"
 echo "Docker已安装并启动"
 echo "SSH已配置: PermitRootLogin=no, PasswordAuthentication=no, AllowUsers=work"
+echo "虚拟内存: ${SWAP_SIZE} swap已配置"
+echo "sysctl: vm.swappiness=10, vm.vfs_cache_pressure=50 已持久化"
