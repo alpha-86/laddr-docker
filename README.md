@@ -17,6 +17,35 @@ rsyslog → 集中式日志收集
 
 ## 快速开始
 
+### 0. 服务器系统初始化（Rocky Linux）
+
+如果是新服务器或纯净系统，需要先运行系统初始化脚本：
+
+```bash
+# 下载并执行初始化脚本
+curl -fsSL https://raw.githubusercontent.com/your-repo/laddr-docker/main/init_sys_rocky.sh -o init_sys_rocky.sh
+chmod +x init_sys_rocky.sh
+sudo ./init_sys_rocky.sh
+```
+
+**初始化脚本功能：**
+
+| 功能 | 说明 |
+|------|------|
+| 用户管理 | 创建 `work` 用户组和用户，设置密码 |
+| 主机名 | 配置服务器主机名 |
+| 系统工具 | 安装 wget, vim, zip, unzip, tar, net-tools, git, firewalld |
+| Docker | 安装 Docker CE, docker-ce-cli, containerd.io |
+| SSH | 配置公钥登录，禁止 root 登录，禁止密码登录，只允许 work 用户 |
+| sudoers | 配置 work 用户 sudo 权限（含 dnf 免密） |
+| 防火墙 | 开放 80/tcp, 443/tcp 端口 |
+
+**初始化完成后：**
+
+- 使用 `work` 用户登录服务器
+- Docker 已安装并启动
+- 防火墙已配置
+
 ### 1. 初始化项目
 
 ```bash
