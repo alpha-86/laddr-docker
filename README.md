@@ -58,7 +58,7 @@ cd /home/work/laddr-docker
 **方式二：手动克隆**
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/alpha-86/laddr-docker.git
 cd laddr-docker
 ./gen_env.sh
 ```
@@ -78,25 +78,16 @@ CF_Email=your_cloudflare_email
 
 # 域名列表（格式：dns_provider:domain1;domain2）
 # dns_ali = 阿里云 DNS，dns_cf = Cloudflare DNS
-DOMAIN_LIST="dns_ali:example.com"
+DOMAIN_LIST="dns_ali:example.com;example2.com dns_cf:example3.com"
 
 # ACME 邮箱
 ACME_SH_EMAIL=your_email@example.com
 ```
 
-### 3. 部署和测试
+### 3. 部署
 
 ```bash
-# 启动服务
 docker compose up -d
-
-# 运行测试套件
-./scripts/test.sh
-
-# 运行特定测试
-./scripts/test.sh --case nginx      # Nginx 路由测试
-./scripts/test.sh --case vision     # Xray Vision 代理测试
-./scripts/test.sh --case xhttp      # Xray XHTTP 代理测试
 ```
 
 ## 生成客户端配置
