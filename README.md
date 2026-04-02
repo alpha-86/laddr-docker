@@ -23,7 +23,7 @@ rsyslog → 集中式日志收集
 
 ```bash
 # 下载并执行初始化脚本
-curl -fsSL https://raw.githubusercontent.com/alpha-86/laddr-docker/main/init_sys_rocky.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alpha-86/laddr-docker/b1/init_sys_rocky.sh | bash
 ```
 
 **初始化脚本功能：**
@@ -58,7 +58,7 @@ cd /home/work/laddr-docker
 **方式二：手动克隆**
 
 ```bash
-git clone https://github.com/alpha-86/laddr-docker.git
+git clone -b b1 https://github.com/alpha-86/laddr-docker.git
 cd laddr-docker
 ./gen_env.sh
 ```
