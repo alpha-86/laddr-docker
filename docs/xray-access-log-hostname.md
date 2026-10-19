@@ -2,7 +2,8 @@
 
 > 日期：2026-05-19
 > 分支：b1
-> 相关代码：`scripts/test.sh`、`xray/etc/config.json.tpl`
+> 相关代码：`scripts/test.sh`、`xray/etc/config.json.tpl`、`XTLS/Xray-core`
+> （`common/log/access.go`、`proxy/vless/inbound/inbound.go`、`app/dispatcher/default.go`）
 
 ## 1. 背景
 
@@ -28,9 +29,20 @@ accepted tcp:142.251.x.x:443    ← 没有 host，断言失败
 
 ### 3.1 access log 记录的是 VLESS 请求头携带的目标地址
 
-Xray 的 VLESS 入站在记录 access log 时，使用的是 **VLESS 请求头中的目标地址**
-（`proxy/vless/inbound` 里的 `request.Destination()`），也就是**客户端发什么就记什么**。
-服务端后续的 sniffing 覆写发生在记录日志之后，只影响路由和实际出口，**不会改变日志中的目标**。
+Xray 的 VLESS 入站在记录 access log 时，使用的是 **VLESS 请求头中的目标地址**——
+源码中 `proxy/vless/inbound/inbound.go` 的 `Process()` 里构造日志：
+
+```go
+ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
+    From:   connection.RemoteAddr(),
+    To:     request.Destination(), // ← VLESS 请求头携带的目标
+    Status: log.AccessAccepted,
+    ...
+})
+```
+
+也就是**客户端发什么就记什么**。服务端后续的 sniffing 覆写发生在记录日志之后，
+只影响路由和实际出口，**不会改变日志中的目标**。
 
 因此，想让日志里出现域名，唯一办法是让 **VLESS 请求头本身就携带域名**。
 
@@ -104,7 +116,68 @@ curl 的 `--socks5`（区别于 `--socks5-hostname`）会**在本地先做 DNS �
 - `"rejectUnknownSni": true`（9000）：SNI 不在证书列表中的 TLS 连接直接拒绝，抗主动探测；
 - 路由：`geosite:google → direct`（Google 走直连出口），`geoip:cn / geoip:private → blocked`。
 
-## 6. 完整链路验证（test.sh case 5 / 6）
+## 6. access log 可配置吗？能否同时打出目标和 TLS SNI？
+
+### 6.1 日志格式硬编码，不可配置
+
+`common/log/access.go` 中的 `AccessMessage.String()` 把格式写死：
+
+```
+from <来源> accepted|rejected <目标> [入站tag >> 出站tag] [reason] [email: xxx]
+```
+
+字段固定为 `From` / `To` / `Status` / `Reason` / `Email` / `Detour` 六项，
+**没有配置项可以追加自定义字段（如 SNI）**。日志配置的全部选项（`infra/conf/log.go`）：
+
+| 配置项 | 作用 |
+|---|---|
+| `access` | access log 文件路径，或 `"none"` 关闭 |
+| `error` | error/general log 文件路径，或 `"none"` 关闭 |
+| `loglevel` | `debug` / `info` / `warning` / `error` / `none` |
+| `dnsLog` | 记录 DNS 查询日志 |
+| `maskAddress` | 日志中的 IP 打码（隐私保护） |
+
+### 6.2 拿 TLS SNI 的现成办法：`sniffed domain` info 日志
+
+虽然 access log 本身打不了 SNI，但 Xray 在 **sniffing 覆写目标时**会往 general log
+写一条 info 级日志（`app/dispatcher/default.go` 的 `Dispatch()`）：
+
+```go
+errors.LogInfo(ctx, "sniffed domain: ", domain)
+```
+
+- 写入 **error log 文件**，不是 access log；
+- 当前服务端配置 `"loglevel": "warning"` 会过滤它，**调成 `"info"` 才会出现**；
+- 打印条件：sniffing 嗅探到域名且协议命中 `destOverride`，服务端两个入站均已满足。
+
+开启后两条日志配合即可还原"目标 + TLS host"：
+
+```
+# access.log
+accepted tcp:142.251.x.x:443 [入站tag >> direct]
+
+# error.log（同一时间戳）
+sniffed domain: www.google.com
+```
+
+| 场景 | access log 的 `<目标>` | TLS host 从哪看 |
+|---|---|---|
+| 客户端传域名（本文第 4 节的修复） | `www.google.com:443` | 目标本身就是 host，无需额外信息 |
+| 客户端传 IP | `142.251.x.x:443` | error log 的 `sniffed domain`（info 级，按时间戳关联） |
+
+> 注意：info 级日志量明显增大，生产环境长期开启建议配合 logrotate。
+
+### 6.3 如果必须"同一行同时有目标 + SNI"
+
+配置层面做不到，可选方案：
+
+1. **改源码重编译**：给 `AccessMessage` 增加字段，或在 vless inbound 中把
+   `session.Content` 的嗅探结果拼进 `Reason`。项目使用 `teddysun/xray` 官方镜像，
+   需要自行维护构建链，成本高；
+2. **外部关联**：HAProxy 日志已有**外层 SNI**（入站连接的 serverName，即测试域名），
+   access log 有目标，按时间戳拼接分析。
+
+## 7. 完整链路验证（test.sh case 5 / 6）
 
 ```
 curl --socks5 127.0.0.1:11080 https://www.google.com
@@ -132,7 +205,7 @@ freedom outbound → www.google.com
 3. **服务端日志**（`log/xray_access.log`）：`grep 'from.*accepted.*www.google.com'` 确认
    VLESS 目标携带域名、服务端正确处理。
 
-## 7. 配置速查
+## 8. 配置速查
 
 ### 客户端（测试脚本生成）
 
@@ -168,7 +241,10 @@ freedom outbound → www.google.com
 }
 ```
 
-## 8. 排查要点
+> 若需查看 TLS SNI，将 `log.loglevel` 调为 `"info"`，在 error log 中查找
+> `sniffed domain: <域名>`，与 access log 按时间戳关联（见 6.2）。
+
+## 9. 排查要点
 
 服务端日志只打 IP、没有 host 时，按顺序检查：
 
@@ -176,3 +252,5 @@ freedom outbound → www.google.com
 2. 应用是否把 IP 而不是域名交给代理（如 `curl --socks5` 本地解析）；
 3. 客户端 routing 的 `domainStrategy` 是否把域名提前解析成了 IP（如 `UseIP`）；
 4. 不要把希望寄托在服务端 sniffing 上——它只影响路由和出口，不改变日志记录的目标。
+5. 需要同时观察目标与 TLS SNI 时，将 `loglevel` 调为 `info`，在 error log 中查找
+   `sniffed domain: <域名>`，与 access log 按时间戳关联（见第 6 节）。
