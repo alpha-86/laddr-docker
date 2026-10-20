@@ -4,6 +4,8 @@
 > 分支：b1
 > 相关代码：`scripts/test.sh`、`xray/etc/config.json.tpl`、`XTLS/Xray-core`
 > （`common/log/access.go`、`proxy/vless/inbound/inbound.go`、`app/dispatcher/default.go`）
+> 相关文档：[README-002-ssr-plus-accesslog-hostname.md](README-002-ssr-plus-accesslog-hostname.md)
+> （OpenWrt ssr-plus 客户端的域名丢失场景与版本差异）
 
 ## 1. 背景
 
