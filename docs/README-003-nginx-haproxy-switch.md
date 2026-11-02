@@ -1,8 +1,8 @@
 # 默认 Nginx 直连入口 + HAProxy 可选切换 设计文档
 
-> 日期：2026-11-02（同日两轮 review 修订：第一轮补齐 stream 接线/切换顺序/回滚/迁移/deploy 模式感知/统一渲染/验证范围；第二轮修正 nginx -t 时序、按模式回滚、半完成收敛、验证域名构造、case 7 断言、IP 验证路径等）
+> 日期：2026-11-02（同日四轮 review 修订：第一轮补齐 stream 接线/切换顺序/回滚/迁移/deploy 模式感知/统一渲染/验证范围；第二轮修正 nginx -t 时序、按模式回滚、半完成收敛、验证域名构造、case 7 断言、IP 验证路径；第三轮修正无效失败注入、统一字节偏移断言、case 7 归因规则、外部 IP 验证强制化；第四轮修正 case 4/5/6 残留时间窗断言、case 8 执行方式（默认本机直跑）/前置条件/日志归因约束）
 > 分支：b1
-> 状态：设计已对齐确认（含两轮 review 修订），本文档即开发规格说明
+> 状态：设计已对齐确认（含四轮 review 修订），本文档即开发规格说明
 > 相关代码：`docker-compose.yml`、`docker-compose-haproxy.yml`、`docker-compose-xray.yml`、`gen_env.sh`、`scripts/render_stream.sh`、`scripts/ngx_haproxy_switch.sh`、`scripts/deploy.sh`、`scripts/test.sh`、`haproxy/`、`nginx/`、`xray/etc/config.json.tpl`
 > 参考项目：`~/docker-box`（nginx stream 做 SNI 入口的成熟先例）
 > 相关文档：[README-001-xray-accesslog-hostname.md](README-001-xray-accesslog-hostname.md)、[README-002-ssr-plus-accesslog-hostname.md](README-002-ssr-plus-accesslog-hostname.md)（切换后 case 5/6 的服务端日志域名断言逻辑不变）
@@ -118,7 +118,7 @@ stream {
 ```
 
 > 两个与 docker-box 不同的字段选择（有明确理由）：
-> - 时间用 `$time_iso8601`（如 `2026-11-02T14:05:11+08:00`）：test.sh/切换脚本要按时间窗匹配"本次请求"的日志行，零填充 HH:MM:SS 前缀可字符串比较；
+> - 时间用 `$time_iso8601`（如 `2026-11-02T14:05:11+08:00`）：test.sh/切换脚本匹配"本次请求"的日志行统一用**字节偏移量方案**（请求前记 `pos=$(wc -c < 日志)`，只查 `tail -c +$((pos+1))` 之后追加的内容），时间戳仅作辅助展示、不作判定条件（三轮 review 修正，规避同秒误匹配与跨午夜失效）；
 > - 增加 `backend:$tcp_backend`：stream 的 `$upstream_addr` 是解析后的 IP:port，不等于 `${NF_XTLS_SERVER}` 主机名，路由断言应直接按 backend 名比对（haproxy 侧对应 `%b`）。
 
 `xray.stream.ngx`（含 `${REALITY_DEST}`、`${NF_XTLS_SERVER}` 占位符，由宿主脚本渲染）：
@@ -318,7 +318,7 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 - **case 4/5/6**（路由日志断言）：
   - haproxy 模式：继续 grep `log/haproxy_access.log` 的 `sni:` 字段与 `%b` backend 名；
   - nginx 模式：grep `log/nginx_stream.log`——SNI 取自 `sni:$ssl_preread_server_name` 字段，backend 取自 `backend:$tcp_backend` 字段（**不再用 `$upstream_addr`**，它是解析后的 IP:port，不等于配置里的主机名）；
-  - **时间窗断言**：case 4/5 补 case 6 同款逻辑——请求发起前记录时间标记，只接受时间 ≥ 标记的新日志行（iso8601 取 `THH:MM:SS` 做零填充字符串比较），禁止 `tail -1` 旧日志冒充成功。
+  - **偏移量断言**：case 4/5/6 请求前记录日志字节偏移 `pos=$(wc -c < <日志文件>)`，只检查 `tail -c +$((pos+1))` 之后追加的新内容；时间戳（`$time_iso8601`）仅作辅助展示，不作判定条件——彻底规避同秒历史记录误匹配与跨午夜比较失效；禁止 `tail -1` 旧日志冒充成功。
 - **新增 case 7（NF 路由 + PP 兼容性，两种模式，二轮 review 重写）**——**路由断言与 PP 断言分离**：
   - 构造 `nf.<四级通配域>` SNI（复用现有动态构造逻辑；证书无可用通配则跳过并警告）；
   - `echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername <域名>` 发起连接——**连接关闭靠 stdin EOF 主动触发**（nginx stream 与 haproxy 的 access log 都在**连接结束**时写入，不是 ClientHello 即记日志）；请求前记录日志文件**字节偏移 pos**，连接关闭后只检查 pos 之后追加的内容（**偏移量方案**），轮询最多 10s；
@@ -330,7 +330,24 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 普通 HTTPS curl 走默认 nginx 后端，**不会产生 xray 日志**——原方案"普通 curl 后检查 xray_access.log"是错误路径。IP 验证必须分两条，且**第二条强制从服务器之外的机器执行**：
 
 1. **默认 HTTPS 请求**（两模式同路径）：从服务器之外的机器（开发机）`curl https://<默认路由域名>`（走服务器公网 IP），检查 `log/nginx_access.log` 的 `$remote_addr`——经 `real_ip_header proxy_protocol` 还原后应为请求方公网 IP；
-2. **真实代理客户端请求（强制）**：**必须从服务器之外**的客户端各执行一次 Vision 或 XHTTP 代理请求（开发机跑 xray 客户端指向服务器域名，或用真实设备），检查 `log/xray_access.log` 的 `from <IP>` 应为请求方公网 IP。**test.sh 的 case 5/6 在服务器本机发起，源地址恒为 127.0.0.1，只能证明 PP 必需头被接受（REQUIRE 策略下链路成功即证），不能证明外部客户端 IP 被正确还原——不得替代本项**。因此 test.sh 新增 **case 8**：ssh 到开发机（或其他外网跳板，`--dep` 参数指定）运行 xray 客户端经 Vision/XHTTP 出网请求一次，回连服务器日志按**偏移量方案**断言 `from <开发机公网IP>`；**case 8 为两种模式的验收门禁，必须通过**。
+2. **真实代理客户端请求（强制）**：**必须从服务器之外**的客户端各执行一次 Vision 或 XHTTP 代理请求（开发机跑 xray 客户端指向服务器域名，或用真实设备），检查 `log/xray_access.log` 的 `from <IP>` 应为请求方公网 IP。**test.sh 的 case 5/6 在服务器本机发起，源地址恒为 127.0.0.1，只能证明 PP 必需头被接受（REQUIRE 策略下链路成功即证），不能证明外部客户端 IP 被正确还原——不得替代本项**。因此 test.sh 新增 **case 8**：运行 xray 客户端经 Vision 出网请求一次，回连服务器日志按**偏移量方案**断言 `from <开发机公网IP>`；**case 8 为两种模式的验收门禁，必须通过**。
+
+   **执行方式（四轮 review 修正）**：case 8 有两种执行形态，**默认 local——直接在当前执行 test.sh 的开发机直跑，不经 SSH**（原先"ssh 到本机"的默认隐含 self-SSH 依赖：本机 sshd、自登录密钥、本机 docker，缺一则普通全量测试在 case 8 必败且与服务器 PP 配置无关——已废除）；**仅当需要第三方跳板时才 `--dep user@host`，此时全部执行机命令经 SSH 发出**。配置下发相应变为：local 模式本地写文件，--dep 模式 scp。
+
+   **验收前置条件（门禁生效的前提，环境缺失与产品故障必须能区分）**：
+
+   | 前置 | 说明 |
+   |---|---|
+   | 执行机→跳板 SSH 可用 | 仅 `--dep` 模式需要 |
+   | 执行机有 docker、curl、openssl | 准备 xray 客户端二进制、直连探测与出网请求 |
+   | 执行机→服务器公网 443 可达 | marker SNI 直连与代理链路的前提 |
+   | 执行机→测试目标可达 | 出网请求目标为 **www.google.com（固定，不用其他域名）** |
+   | 本机 SOCKS 端口 11082 可用 | xray 客户端 inbound 监听，占用则前置不满足 |
+   | NAT 场景比较的是**服务器观察到的出口公网 IP** | 不是跳板机私网 IP；两条证据（入口源 IP 与 xray `from`）都是服务端视角，NAT 内外两侧一致 |
+
+   **前置缺失的判定**：case 8 是强制验收门禁，前置不满足**判 FAIL 并在信息中明示缺哪项前置（或建议 --dep）——不静默跳过**；不得让全量测试隐式依赖 self-SSH。
+
+   **日志归因约束（四轮 review 修正）**：生产服务器可能有其他并发代理客户端，xray_access.log 的 `from` 记录必须**同时满足**三个条件才归属于本次请求：① `from` 的 IP == 步骤 1 获得的入口观察源 IP；② 目标 == 本次请求的 `www.google.com:443`；③ 记录位于本次请求的字节偏移之后。三者限定后仍有多条时取最后一条。禁止只取"新增日志中任意一条 from"（会误取并发请求导致误判）。
 
 字段名区分（文档/脚本注释统一）：HAProxy 日志来源字段是 `%ci`（log-format 自定义），nginx stream 日志是 `$remote_addr`，xray access log 是 `from`。
 
@@ -339,14 +356,14 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 - **不变**：acme.sh（deploy 目标始终是 nginx 容器）、nginx `server_params`、xray 端口规划（18910/18911/9000/9001）、证书流程、`.env` 的 rsync 排除策略。
 - **修正（原错误结论）**：deploy.sh 需要模式感知改造（见 3.9）；"deploy 天然保证 HAProxy/Xray 同批更新"不成立——`stop && up -d` 不会移除 orphan 容器，旧 haproxy 可能继续持有 443，必须显式 `docker stop/rm`。
 
-## 5. 验证计划（两轮 review 扩充）
+## 5. 验证计划（四轮 review 扩充）
 
 部署到 `sg.cqcy.fun` 后执行，全部通过才算完成：
 
 1. **迁移验证**：旧结构（haproxy 容器 + 旧 .env）上跑新 deploy.sh，确认输出迁移报告、旧容器被 `docker rm` 删除、nginx 模式拉起；
-2. **nginx 模式全量**：`test.sh` 全部用例（含新增 case 7）；
-3. **切到 haproxy**：`ngx_haproxy_switch.sh haproxy` → haproxy 模式全量 `test.sh`；
-4. **切回 nginx**：`ngx_haproxy_switch.sh nginx` → nginx 模式全量 `test.sh`（最终停在默认模式）；
+2. **nginx 模式全量**：`test.sh` 全部用例（明确含 case 7/8——case 8 是验收门禁）；
+3. **切到 haproxy**：`ngx_haproxy_switch.sh haproxy` → haproxy 模式全量 `test.sh`（含 case 7/8）；
+4. **切回 nginx**：`ngx_haproxy_switch.sh nginx` → nginx 模式全量 `test.sh`（含 case 7/8；最终停在默认模式）；
 5. **NF + PP v1 实测**：case 7 的 PP 断言必须握手成功（`NF_XTLS_SERVER` 指向远端时即远端 PP v1 兼容性证据；**nginx 发 v1 与 HAProxy 发 v2 不能默认等价**）；握手失败时按 4.1 的归因规则报告（可能为 PP 版本或上游异常），只有 v2 对照成功 + v1 失败才定性 PP v1 不兼容；
 6. **真实客户端 IP（两条路径，外部验证为强制门禁）**：开发机经公网 IP 发默认 HTTPS 请求核 nginx_access.log；**从服务器之外的真实代理客户端**（test.sh case 8）走 Vision/XHTTP 核 xray_access.log 的 `from` 为外部公网 IP——两模式各做一次，**case 8 不通过则验收不通过**；服务器本机的 case 5/6 不可替代；
 7. **新请求断言**：各次切换后的校验均发新请求，且按**字节偏移量**只匹配本次追加的日志（时间戳仅作辅助展示）；应实现于切换脚本、test.sh case 4–8；
@@ -366,7 +383,7 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 5. `gen_env.sh`：交互询问 + touch stream 日志 + 调用渲染。**✅ 已完成（语法检查通过，未实测交互）**
 6. `scripts/ngx_haproxy_switch.sh`（新，按 3.8 二轮修订版：nginx -t 前置、按模式回滚、直操 docker、证书 SAN 构造验证域名、/tmp 备份、flock、sudo ss 退化）。**✅ 已完成（语法检查通过，未经服务器实测）**
 7. `scripts/deploy.sh`：模式感知 + 迁移流程（按 3.9，直操 docker 删除旧容器）。**✅ 已完成（语法检查通过，未经服务器实测）**
-8. `scripts/test.sh`：模式检测、case 1/2/4/5/6 双模式分支 + **全部改用偏移量方案**（请求前记 pos，只查追加内容，时间戳仅辅助）、新增 case 7（NF 路由 + PP 握手双断言、stdin EOF 关连接后轮询新增日志、失败归因按 4.1）、新增 **case 8**（外部真实代理客户端 IP 验证，`--dep` 指定外网跳板，两种模式验收门禁）。**✅ 已完成（语法检查通过，未经服务器实测）**
+8. `scripts/test.sh`：模式检测、case 1/2/4/5/6 双模式分支 + **全部改用偏移量方案**（请求前记 pos，只查追加内容，时间戳仅辅助）、新增 case 7（NF 路由 + PP 握手双断言、stdin EOF 关连接后轮询新增日志、失败归因按 4.1）、新增 **case 8**（外部真实代理客户端 IP 验证：**默认本机直跑不经 SSH**，`--dep user@host` 时才 SSH 跳板；前置缺失判 FAIL 不跳过；from 归因三约束 = 源 IP == 入口观察 IP + 目标 == www.google.com:443 + 字节偏移之后；两种模式验收门禁）。**✅ 已完成（语法检查通过，未经服务器实测）**
 9. `README.md`、`CLAUDE.md`：双模式架构、快速开始（含 render 步骤）、切换脚本说明；清理"单一 HAProxy 架构"文案。**✅ 已完成**
 10. 按第 5 节验证计划实测并报告。**⏳ 未开始**
 

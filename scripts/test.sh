@@ -2,7 +2,7 @@
 # laddr-docker 测试脚本
 # 职责：测试 443 入口（Nginx 默认 / HAProxy 可选）SNI 分流到 Nginx 和 Xray
 # 用例：1 容器 2 端口 3 证书 4 ngx 路由 5 Vision 代理 6 XHTTP 代理
-#       7 NF 路由+PP 兼容性 8 外部真实客户端 IP 验证（--dep 指定外网跳板）
+#       7 NF 路由+PP 兼容性 8 外部真实客户端 IP 验证（默认本机直跑，--dep 指定外网跳板走 SSH）
 
 set -e
 
@@ -1620,11 +1620,17 @@ test_case_7() {
 
 # Test 8: 外部真实代理客户端 IP 验证（README-003 4.2 / 5.6 —— 两种模式验收门禁）
 # 服务器本机的 case 5/6 源地址恒为 127.0.0.1，不能证明外部客户端 IP 被 PP 正确还原。
-# 本用例从跳板机（--dep，默认本机）运行 xray 客户端经公网走 Vision 出网：
-#   1) 跳板直连 443 发起一次带唯一 SNI 的 TLS 连接（握手成败均可）——入口路由日志记录
-#      服务端观察到的跳板真实源 IP（stream $remote_addr / haproxy %ci）；
-#   2) 跳板经 xray 代理出网请求——xray_access.log 新行的 from <IP> 为 PP 还原的客户端 IP；
+# 执行方式（四轮 review 修正）：默认【本机直跑】（不经 SSH，要求本机有 docker/curl/openssl、
+# 11082 空闲、可达服务器公网 443 与 www.google.com）；仅 --dep user@host 时才 SSH 到跳板执行。
+# 本用例从执行机运行 xray 客户端经公网走 Vision 出网：
+#   1) 执行机直连 443 发起一次带唯一 SNI 的 TLS 连接（握手成败均可）——入口路由日志记录
+#      服务端观察到的执行机真实源 IP（stream $remote_addr / haproxy %ci）；
+#   2) 执行机经 xray 代理出网请求——xray_access.log 新行的 from <IP> 为 PP 还原的客户端 IP；
 #   3) 断言两者相等且非 127.0.0.1 → PP 端到端还原外部真实 IP。
+# 归因约束（四轮 review 修正）：from 记录必须同时满足 源 IP == 步骤 1 的 seen_ip、
+#   目标 == 本次请求的 www.google.com:443、位于本次字节偏移之后——生产环境有其他并发
+#   客户端时，只取"任意一条 from"可能误取他人请求导致误判。
+# 前置缺失判 FAIL（不静默跳过）——本用例是强制验收门禁，环境不满足与产品故障必须区分上报。
 test_case_8() {
     echo ""
     echo "=========================================="
@@ -1632,21 +1638,46 @@ test_case_8() {
     echo "=========================================="
     echo ""
 
+    # dep_exec：统一执行机命令入口——远程跳板走 SSH，默认本机直跑
+    local dep_remote=0
     local dep="${DEP_SERVER:-}"
-    if [ -z "$dep" ]; then
-        local myip=$(hostname -I 2>/dev/null | awk '{print $1}' | head -1)
-        dep="$(whoami)@${myip:-localhost}"
+    dep_exec() {
+        if [ "$dep_remote" = "1" ]; then
+            ssh -o ConnectTimeout=5 "$dep" "$1"
+        else
+            bash -c "$1"
+        fi
+    }
+    if [ -n "$dep" ]; then
+        dep_remote=1
+        log_info "外网跳板: $dep（SSH 执行）"
+    else
+        log_info "执行机: 本机直跑（不经 SSH；如需第三方跳板用 --dep user@host）"
     fi
-    log_info "外网跳板: $dep"
     log_info "服务端:   $DEPLOYMENT_SERVER"
 
-    if ! ssh -o ConnectTimeout=5 "$dep" "echo OK" >/dev/null 2>&1; then
-        test_fail "无法 SSH 到跳板机 $dep（可用 --dep user@host 指定）"
-        return 1
-    fi
-    if ! ssh -o ConnectTimeout=5 "$dep" "command -v docker" >/dev/null 2>&1; then
-        test_fail "跳板机 $dep 无 docker，无法准备 xray 客户端"
-        return 1
+    if [ "$dep_remote" = "1" ]; then
+        if ! ssh -o ConnectTimeout=5 "$dep" "echo OK" >/dev/null 2>&1; then
+            test_fail "无法 SSH 到跳板机 $dep（可用 --dep user@host 指定；或省略 --dep 在本机直跑）"
+            return 1
+        fi
+        for tool in docker curl openssl; do
+            if ! ssh -o ConnectTimeout=5 "$dep" "command -v $tool" >/dev/null 2>&1; then
+                test_fail "跳板机 $dep 缺 $tool（case 8 前置：docker/curl/openssl）"
+                return 1
+            fi
+        done
+    else
+        for tool in docker curl openssl; do
+            if ! command -v $tool >/dev/null 2>&1; then
+                test_fail "本机缺 $tool（case 8 前置：docker/curl/openssl；或改用 --dep user@host 指定跳板机）"
+                return 1
+            fi
+        done
+        if timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/11082' 2>/dev/null; then
+            test_fail "本机 11082 端口已被占用（case 8 前置：SOCKS 端口 11082 可用）"
+            return 1
+        fi
     fi
 
     if [ -z "$XRAY_TEST_DOMAIN" ]; then
@@ -1667,18 +1698,18 @@ test_case_8() {
         return 1
     fi
 
-    # 在跳板机准备 xray 二进制（优先从镜像提取，兜底从运行中的 xray 容器拷贝）
+    # 在执行机准备 xray 二进制（优先从镜像提取，兜底从运行中的 xray 容器拷贝）
     local dep_tmp="/tmp/xray_extip_$$"
-    ssh "$dep" "mkdir -p $dep_tmp && cid=\$(docker create teddysun/xray 2>/dev/null) && docker cp \$cid:/usr/bin/xray $dep_tmp/xray 2>/dev/null && docker rm -f \$cid >/dev/null 2>&1; chmod +x $dep_tmp/xray 2>/dev/null" 2>/dev/null
-    if ! ssh "$dep" "test -x $dep_tmp/xray" 2>/dev/null; then
-        ssh "$dep" "cname=\$(docker ps --format '{{.Names}}' | grep -i xray | head -1); [ -n \"\$cname\" ] && docker cp \$cname:/usr/bin/xray $dep_tmp/xray && chmod +x $dep_tmp/xray" 2>/dev/null
+    dep_exec "mkdir -p $dep_tmp && cid=\$(docker create teddysun/xray 2>/dev/null) && docker cp \$cid:/usr/bin/xray $dep_tmp/xray 2>/dev/null && docker rm -f \$cid >/dev/null 2>&1; chmod +x $dep_tmp/xray 2>/dev/null" 2>/dev/null
+    if ! dep_exec "test -x $dep_tmp/xray" 2>/dev/null; then
+        dep_exec "cname=\$(docker ps --format '{{.Names}}' | grep -i xray | head -1); [ -n \"\$cname\" ] && docker cp \$cname:/usr/bin/xray $dep_tmp/xray && chmod +x $dep_tmp/xray" 2>/dev/null
     fi
-    if ! ssh "$dep" "test -x $dep_tmp/xray" 2>/dev/null; then
-        test_fail "跳板机无法准备 xray 二进制"
+    if ! dep_exec "test -x $dep_tmp/xray" 2>/dev/null; then
+        test_fail "执行机无法准备 xray 二进制（需 docker 可用）"
         return 1
     fi
 
-    # 生成跳板机 xray 客户端配置（SOCKS 11082 + VLESS Vision → 服务端域名:443 公网）
+    # 生成执行机 xray 客户端配置（SOCKS 11082 + VLESS Vision → 服务端域名:443 公网）
     local local_config="/tmp/xray_extip_cfg_$$.json"
     cat > "$local_config" <<EOF
 {
@@ -1697,43 +1728,46 @@ test_case_8() {
   ]
 }
 EOF
-    scp "$local_config" "$dep:$dep_tmp/client_config.json" >/dev/null 2>&1
+    if [ "$dep_remote" = "1" ]; then
+        scp "$local_config" "$dep:$dep_tmp/client_config.json" >/dev/null 2>&1
+    else
+        cp "$local_config" "$dep_tmp/client_config.json"
+    fi
     rm -f "$local_config"
 
-    # ---- 1) 跳板直连：让入口日志记录服务端看到的跳板真实源 IP ----
+    # ---- 1) 执行机直连：让入口日志记录服务端看到的执行机真实源 IP ----
     local marker_sni="extip$RANDOM.$XRAY_TEST_DOMAIN"
     local route_log=$(route_log_file)
     local pos_route=$(remote_cmd "wc -c < $route_log 2>/dev/null || echo 0" 2>/dev/null)
     pos_route=${pos_route:-0}
-    log_info "跳板直连 443（marker SNI: $marker_sni）记录服务端视角源 IP..."
-    ssh "$dep" "echo | timeout 8 openssl s_client -connect $XRAY_TEST_DOMAIN:443 -servername '$marker_sni' >/dev/null 2>&1" || true
+    log_info "执行机直连 443（marker SNI: $marker_sni）记录服务端视角源 IP..."
+    dep_exec "echo | timeout 8 openssl s_client -connect $XRAY_TEST_DOMAIN:443 -servername '$marker_sni' >/dev/null 2>&1" || true
     sleep 2
 
     local seen_ip=$(remote_cmd "tail -c +$((pos_route + 1)) $route_log | grep 'sni:$marker_sni' | tail -1 | awk '{print \$1}' | cut -d: -f1" 2>/dev/null)
     if [ -z "$seen_ip" ]; then
-        test_fail "入口日志未找到 marker SNI=$marker_sni 的记录，无法获取服务端视角源 IP"
-        ssh "$dep" "pkill -f 'xray run -c $dep_tmp/client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null
+        test_fail "入口日志未找到 marker SNI=$marker_sni 的记录（执行机→服务器 443 公网可达性前置未满足？）"
+        dep_exec "pkill -f 'xray run -c $dep_tmp/client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null
         return 1
     fi
-    log_info "服务端视角跳板源 IP: $seen_ip"
+    log_info "服务端视角执行机源 IP: $seen_ip"
 
-    # ---- 2) 跳板经 xray 代理出网：服务端 xray 日志 from <IP> 应为同一 IP ----
+    # ---- 2) 执行机经 xray 代理出网：服务端 xray 日志 from <IP> 应为同一 IP ----
     local pos_xray=$(remote_cmd "wc -c < log/xray_access.log 2>/dev/null || echo 0" 2>/dev/null)
     pos_xray=${pos_xray:-0}
 
-    ssh "$dep" "cd $dep_tmp && nohup ./xray run -c client_config.json > client_stdout.log 2>&1 & echo \$! > xray.pid" >/dev/null 2>&1 &
+    dep_exec "cd $dep_tmp && nohup ./xray run -c client_config.json > client_stdout.log 2>&1 & echo \$! > xray.pid" >/dev/null 2>&1
     sleep 5
 
-    ssh "$dep" "curl -s --max-time 15 --socks5 127.0.0.1:11082 -o /dev/null -w '%{http_code}' https://www.google.com" >/dev/null 2>&1 &
-    local curl_pid=$!
-    wait $curl_pid 2>/dev/null
+    dep_exec "curl -s --max-time 15 --socks5 127.0.0.1:11082 -o /dev/null -w '%{http_code}' https://www.google.com" >/dev/null 2>&1 || true
     sleep 2
-    ssh "$dep" "pkill -f 'xray run -c $dep_tmp/client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null || true
+    dep_exec "pkill -f 'xray run -c $dep_tmp/client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null || true
 
-    local from_ip=$(remote_cmd "tail -c +$((pos_xray + 1)) log/xray_access.log | grep 'from' | grep -o 'from [0-9.]*:' | tail -1 | awk '{print \$2}' | tr -d ':'" 2>/dev/null)
+    # 归因约束：from == seen_ip 且 目标 == www.google.com:443 且 位于字节偏移之后（四轮 review 修正）
+    local from_ip=$(remote_cmd "tail -c +$((pos_xray + 1)) log/xray_access.log | grep 'from ${seen_ip}:' | grep 'accepted.*www\.google\.com:443' | tail -1 | grep -o 'from [0-9.]*:' | awk '{print \$2}' | tr -d ':'" 2>/dev/null)
 
     if [ -z "$from_ip" ]; then
-        test_fail "xray_access.log 新增日志中未找到 from 记录（偏移 $pos_xray）"
+        test_fail "xray_access.log 新增日志中未找到 from=${seen_ip} → www.google.com:443 的记录（偏移 $pos_xray；代理链路或出网前置未满足？）"
         return 1
     fi
     log_info "xray 日志 from IP（PP 还原）: $from_ip"
@@ -1798,7 +1832,8 @@ main() {
                 echo "  all             - 运行所有测试（默认）"
                 echo ""
                 echo "选项:"
-                echo "  --dep user@host - 指定 case 8 的外网跳板机（默认: 本机）"
+                echo "  --dep user@host - case 8 经 SSH 在跳板机执行（默认: 本机直跑，"
+                echo "                    要求本机有 docker/curl/openssl、11082 空闲）"
                 echo ""
                 echo "示例:"
                 echo "  $0                    # 运行所有测试"
@@ -1808,7 +1843,7 @@ main() {
                 echo "  $0 --case 6          # 只运行 Xray XHTTP 代理测试"
                 echo "  $0 --case nginx      # 只运行 Nginx 分流测试"
                 echo "  $0 --case nf         # 只运行 NF 路由/PP 兼容性测试"
-                echo "  $0 --case extip --dep work@jumpbox  # 外部跳板跑真实 IP 验证"
+                echo "  $0 --case extip --dep work@jumpbox  # 经 SSH 用跳板机跑真实 IP 验证"
                 exit 0
                 ;;
             *)

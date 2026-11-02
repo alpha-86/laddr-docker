@@ -11,7 +11,7 @@
 
 | 维度 | 状态 |
 |---|---|
-| 设计（README-003） | ✅ 定稿，经过 3 轮 review 修订（记录见第 4 节） |
+| 设计（README-003） | ✅ 定稿，经过 4 轮 review 修订（记录见第 4 节） |
 | 代码（实施清单 1–9） | ✅ 全部完成，通过语法检查 / 本地干跑；**未经服务器实测** |
 | 实测（实施清单 10） | ⏳ 未开始——在 sg 生产执行，需用户确认后按第 2 节 runbook 进行 |
 | 分支 | b1，HEAD = `73d4929`（push 后若有新提交以仓库为准） |
@@ -32,7 +32,7 @@ ssh work@sg.cqcy.fun "cd /home/work/laddr-docker && grep COMPOSE_FILE .env; dock
 # 1. 部署（预期：检测到旧 haproxy 容器 → 迁移路径 → docker rm → nginx 模式拉起）
 ./scripts/deploy.sh
 
-# 2. nginx 模式全量测试（case 8 默认以本机为外网跳板，不通则加 --dep user@跳板）
+# 2. nginx 模式全量测试（case 8 默认本机直跑；本机缺 docker/curl/openssl 或 11082 被占则判 FAIL，改用 --dep user@跳板）
 ./scripts/test.sh
 
 # 3. 切 haproxy + 全量
@@ -84,10 +84,10 @@ ssh -t work@sg.cqcy.fun "sudo systemctl restart docker && sleep 15 && ss -tlnp |
 | `gen_env.sh` | TTY 且 .env 不存在时询问「启用 HAProxy？[y/N]」；`touch log/nginx_stream.log`；调渲染（失败仅告警） | §3.7 | `bash -n` ✓；交互未实测 |
 | `scripts/ngx_haproxy_switch.sh` | **新增**：状态收敛式切换 `nginx\|haproxy\|status`——五项收敛判据（渲染临时文件 cmp）、flock、/tmp 备份（700/600，成功即清理）、**渲染+nginx -t 前置**（失败零影响）、容器操作直操 docker、**按原模式分别回滚**、`sudo -n ss` 退化 TLS 探测、证书 SAN 构造验证域名、**偏移量新请求验证**、**`CURL_BIN` 注入点** | §3.8 | `bash -n` ✓；全部行为待实测 |
 | `scripts/deploy.sh` | 远端模式检测（.env COMPOSE_FILE + haproxy 容器）；**旧结构迁移**（compose stop → `docker stop/rm haproxy` → up -d，含迁移报告）；必需容器/排错提示按模式 | §3.9 | `bash -n` ✓；待实测 |
-| `scripts/test.sh` | 模式检测三助手（`detect_entry_mode`/`route_log_file`/`route_backend_pattern`）；case 1/2/4/5/6 双模式分支 + **全部偏移量断言**；**case 7**（NF 路由 + openssl 握手硬断言 + stdin EOF 关连接轮询 + 归因输出）；**case 8**（`--dep` 外网跳板真实代理客户端 IP 交叉验证：marker SNI 直连取服务端视角源 IP == xray `from` IP，强制非回环，**两种模式验收门禁**） | §4.1/§4.2 | `bash -n` ✓；待实测 |
+| `scripts/test.sh` | 模式检测三助手（`detect_entry_mode`/`route_log_file`/`route_backend_pattern`）；case 1/2/4/5/6 双模式分支 + **全部偏移量断言**；**case 7**（NF 路由 + openssl 握手硬断言 + stdin EOF 关连接轮询 + 归因输出）；**case 8**（**默认本机直跑不经 SSH**（`dep_exec()`，废除 self-SSH），`--dep user@host` 才走 SSH/scp；前置缺失判 FAIL 明示缺项；`--dep` 模式跳板需 docker/curl/openssl、local 模式查本机三件套 + 11082 空闲；外部真实代理客户端 IP 交叉验证：marker SNI 直连取服务端视角源 IP == xray `from` IP（**归因三约束：from==seen_ip + 目标==www.google.com:443 + 偏移之后**），强制非回环，**两种模式验收门禁**） | §4.1/§4.2 | `bash -n` ✓；待实测 |
 | `README.md` | 双模式架构图、快速开始含 `render_stream.sh` 步骤、「入口模式切换」章节 | — | 人工审阅 |
 | `CLAUDE.md` | 架构图/特性/服务（HAProxy 标记可选）/测试用例 1–8 全量对齐 | — | 人工审阅 |
-| `docs/README-003-*.md` | 设计文档，3 轮 review 定稿 | — | 见第 4 节 |
+| `docs/README-003-*.md` | 设计文档，4 轮 review 定稿 | — | 见第 4 节 |
 
 **审阅建议顺序**：README-003（§2.3 技术支点 → §3.8 切换脚本 → §3.9 迁移）→ 上表文件 → 第 4 节 review 记录 → runbook（第 2 节）。
 
@@ -103,6 +103,9 @@ ssh -t work@sg.cqcy.fun "sudo systemctl restart docker && sleep 15 && ss -tlnp |
 
 ### 三轮（5 项）——修正无效注入与验证严谨性
 curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自证书 SAN 而非 `.env` DOMAIN_LIST，改 DOMAIN_LIST 不影响验证——原方案无效；不得破坏正式证书配置）；haproxy 启动失败注入改**破坏 `haproxy.cfg.tpl`**（原"临时容器占用 443"不可行：切换前 443 被 nginx 持有，bind 必失败，且残留占用会拖垮回滚）；新请求断言全量改**字节偏移量方案**（原 `HH:MM:SS ≥ mark` 有同秒历史误匹配与跨午夜失效）；case 7 握手失败**归因修正**（报告"NF 握手失败，可能为 PP 版本或上游异常"，仅 v2 成功+v1 失败对照才定性 PP v1 不兼容）；**外部真实 IP 验证强制化**（新增 test.sh case 8 为验收门禁，服务器本机的 case 5/6 源地址恒 127.0.0.1，不能替代）；切换成功/回滚成功即**清理 /tmp 备份目录**（仅回滚失败保留并提示）。
+
+### 四轮（4 项 + 3 项元信息）——case 8 执行约定与日志归因
+**case 4/5/6 残留时间窗断言清除**（§4.1 仍写"时间 ≥ 标记"，与 §3.8/§5/实施清单的字节偏移统一方案冲突，全文改齐，含 §3.2 决策记录处的旧表述）；**case 8 默认执行方式改为本机直跑**（原"ssh 到本机"隐含 self-SSH 依赖：本机 sshd + 自登录密钥 + 本机 docker，缺一则全量测试在 case 8 必败且与服务器 PP 配置无关——废除 self-SSH，local 模式经 `dep_exec()` 直跑，`--dep user@host` 才走 SSH/scp）；**case 8 验收前置条件写入设计文档 §4.2**（SSH/docker/curl/openssl/443 可达/Google 可达/11082 空闲/NAT 比较的是服务端视角出口公网 IP；前置缺失判 FAIL 并明示缺哪项，不静默跳过）；**case 8 日志归因三约束**（from 记录必须同时满足 源 IP == 入口观察 seen_ip + 目标 == www.google.com:443 + 位于字节偏移之后，禁止取"任意一条 from"——防并发客户端误取）。元信息：顶部/§5 "两轮 review"→四轮；"全量用例"明确为含 case 7/8。测试目标域名固定 **www.google.com**（用户明确）。
 
 ---
 
@@ -143,7 +146,7 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 - `include tcp_stream_params;` 相对路径基于 nginx prefix `/etc/nginx/`（与 docker-box 相同用法），待实测。
 - 宿主机 work 用户 `sudo -n` 免密依赖 `init_sys_rocky.sh` 的 sudoers 配置；无 sudo 时切换脚本的 443 属主检查退化为 TLS 探测（WARN，不判失败）。
 - 切换脚本的 `pick_verify_domain` 依赖容器内 openssl 可读证书；证书未签发时跳过 curl 验证（WARN），不影响切换。
-- case 8 依赖跳板可 SSH、有 docker、跳板→sg 公网 443 可达；默认跳板=本机（bj01），bj01→sg 连通性待实测；跳板在 NAT 后不影响断言（比较的是**服务端视角**两个 IP，仍应相等）。
+- case 8 默认本机直跑（四轮修订，不再 self-SSH）：依赖本机 docker/curl/openssl、11082 空闲、bj01→sg 公网 443 与 www.google.com 可达；`--dep` 模式另需执行机→跳板 SSH；跳板在 NAT 后不影响断言（比较的是**服务端视角**两个 IP，仍应相等）。
 - case 8 的 marker 直连 TLS 握手**预期失败**（vision 对未知 SNI rejectUnknownSni），但入口路由日志仍会记录该连接——此假设待实测确认。
 
 ## 8. 提交记录
