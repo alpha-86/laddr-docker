@@ -40,8 +40,8 @@ backend xray_backend
     server xray 127.0.0.1:18910 send-proxy-v2
 
 backend xhttp_backend
-    # XHTTP+REALITY doesn't support proxy protocol, direct TCP passthrough
-    server xray-xhttp 127.0.0.1:18911
+    # XHTTP+REALITY 通过 sockopt.acceptProxyProtocol 接收 PP（REQUIRE 策略，必须发送）
+    server xray-xhttp 127.0.0.1:18911 send-proxy-v2
 
 backend ngx_backend
     # Send proxy protocol v2 to preserve client IP

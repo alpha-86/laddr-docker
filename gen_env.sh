@@ -91,11 +91,24 @@ generate_reality_config() {
     echo "REALITY_SHORT_IDS=[\"${short_id}\"]"
 }
 
+# 443 入口模式：仅全新初始化（.env 不存在）且交互式终端时询问；默认 nginx
+DEFAULT_COMPOSE_FILE="docker-compose.yml:docker-compose-xray.yml"
+if [ ! -f "$ENV_FILE" ] && [ -t 0 ]; then
+    echo ""
+    read -p "启用 HAProxy 作为 443 入口？[y/N] " enable_haproxy
+    if [ "$enable_haproxy" = "y" ] || [ "$enable_haproxy" = "Y" ]; then
+        DEFAULT_COMPOSE_FILE="docker-compose.yml:docker-compose-xray.yml:docker-compose-haproxy.yml"
+        echo "已选择 HAProxy 入口模式"
+    else
+        echo "使用默认 Nginx 入口模式"
+    fi
+fi
+
 # 定义所有变量及其默认值（按输出顺序）
 # 格式: "变量名|默认值|分块标题"
 VARS=(
     "COMPOSE_PATH_SEPARATOR|:|#docker compose file"
-    "COMPOSE_FILE|docker-compose.yml:docker-compose-xray.yml|"
+    "COMPOSE_FILE|$DEFAULT_COMPOSE_FILE|"
     "DOCKER_BOX_HOME|$SCRIPT_DIR|#环境目录"
     "NGINX_PATH|$SCRIPT_DIR/nginx|"
     "HAPROXY_PATH|$SCRIPT_DIR/haproxy|"
@@ -213,3 +226,17 @@ done
 rm -f "$FINAL_VARS_TEMP"
 
 echo "已生成 $ENV_FILE"
+
+# 预创建 stream 日志文件（避免 compose 单文件 bind mount 在源缺失时创建目录导致 nginx 无法打开日志）
+# 只创建、不截断；已存在则保持原样
+mkdir -p "$SCRIPT_DIR/log"
+touch "$SCRIPT_DIR/log/nginx_stream.log"
+
+# 渲染 nginx stream 激活文件（幂等；编辑 .env 后需重新执行 scripts/render_stream.sh）
+if [ -f "$SCRIPT_DIR/scripts/render_stream.sh" ]; then
+    if ! sh "$SCRIPT_DIR/scripts/render_stream.sh"; then
+        echo ""
+        echo "警告: stream 激活文件渲染失败（.env 中 REALITY_DEST / NF_XTLS_SERVER 可能为空）"
+        echo "      补齐 .env 后请执行: sh scripts/render_stream.sh"
+    fi
+fi

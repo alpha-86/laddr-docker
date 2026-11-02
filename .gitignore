@@ -40,3 +40,5 @@ node_modules/
 
 # Deployment config
 .deployment-config
+# Generated nginx stream config (by scripts/render_stream.sh)
+nginx/conf/conf.d/xray.stream

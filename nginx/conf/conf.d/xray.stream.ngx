@@ -1,0 +1,31 @@
+# Nginx 入口模式的 SNI 路由全量配置（443 server + upstreams + map）
+# 本文件含 ${REALITY_DEST} / ${NF_XTLS_SERVER} 占位符，由 scripts/render_stream.sh 渲染为 xray.stream
+# HAProxy 模式下 443 由 HAProxy 接管，本文件不生效（render 会放置 xray.stream.haproxy 空文件）
+upstream xray {
+    server 127.0.0.1:18910;
+}
+upstream xhttp {
+    server 127.0.0.1:18911;
+}
+upstream ngx {
+    server 127.0.0.1:8443;
+}
+upstream nf_xtls {
+    server ${NF_XTLS_SERVER};
+}
+
+map $ssl_preread_server_name $tcp_backend {
+    ~^(?i)(x|xyz|api|dt|ai)\.[^.]+\.[^.]+\.[^.]+$      xray;
+    ~^(?i)^${REALITY_DEST}$                           xhttp;
+    ~^(?i)^(web|app|cdn)\.[^.]+\.[^.]+\.[^.]+$        xhttp;
+    ~^(?i)^(nf|netflix|nfx|nfv)\.[^.]+\.[^.]+\.[^.]+$  nf_xtls;
+    default                                            ngx;
+}
+
+server {
+    listen 443;
+    listen [::]:443;
+    ssl_preread on;
+    proxy_protocol on;
+    proxy_pass $tcp_backend;
+}

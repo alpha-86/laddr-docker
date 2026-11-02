@@ -1,0 +1,12 @@
+# Nginx stream 骨架（恒包含，与入口模式无关）
+# 由 nginx.conf 顶层 include；443 server 与路由 map 在 conf.d/xray.stream 中
+# （xray.stream 由 scripts/render_stream.sh 按模式生成：xray.stream.ngx / xray.stream.haproxy）
+stream {
+    log_format proxy '$remote_addr:$remote_port [$time_iso8601] '
+                     'sni:$ssl_preread_server_name backend:$tcp_backend $protocol $status $bytes_sent $bytes_received '
+                     '$session_time "$upstream_addr" '
+                     '"$upstream_bytes_sent" "$upstream_bytes_received" "$upstream_connect_time"';
+
+    access_log /var/log/nginx/stream.log proxy;
+    include /etc/nginx/conf.d/*.stream;
+}

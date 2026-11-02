@@ -60,6 +60,9 @@
       "streamSettings": {
         "network": "xhttp",
         "security": "reality",
+        "sockopt": {
+          "acceptProxyProtocol": true
+        },
         "xhttpSettings": {
           "path": "/js/app.js"
         },

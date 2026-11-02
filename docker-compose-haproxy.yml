@@ -1,0 +1,27 @@
+# HAProxy 入口模式（可选）：443 由 HAProxy 做 SNI 路由
+# 默认不启用；启用方式：
+#   1) .env 的 COMPOSE_FILE 追加 :docker-compose-haproxy.yml（gen_env.sh 询问或 ngx_haproxy_switch.sh 自动完成）
+#   2) scripts/render_stream.sh 放置空 stream 激活文件，避免 nginx 抢占 443
+services:
+  haproxy:
+    restart: always
+    container_name: haproxy
+    image: haproxy:latest
+    network_mode: host
+    user: root
+    labels:
+      - __haproxy__
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ${HAPROXY_PATH}/haproxy.cfg.tpl:/usr/local/etc/haproxy/haproxy.cfg.tpl:ro
+      - ${HAPROXY_PATH}/entrypoint.sh:/entrypoint.sh:ro
+      - ${HAPROXY_PATH}/maps:/usr/local/etc/haproxy/maps:rw
+      # 日志文件映射到统一log目录
+      - ${DOCKER_BOX_HOME}/log/haproxy_access.log:/var/log/haproxy/access.log
+      - ${DOCKER_BOX_HOME}/log/haproxy_error.log:/var/log/haproxy/error.log
+    environment:
+      - TZ=Asia/Shanghai
+      - NF_XTLS_SERVER=${NF_XTLS_SERVER}
+      - REALITY_DEST=${REALITY_DEST}
+    depends_on:
+      - nginx
