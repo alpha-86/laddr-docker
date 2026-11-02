@@ -39,6 +39,23 @@
 - nginx 容器是否带 `sudo` 无关（ss 在宿主机跑）；宿主机 work 用户 sudo 免密依赖 init_sys_rocky.sh 的 sudoers 配置。
 - 切换脚本 `pick_verify_domain` 依赖容器内 openssl 可读证书——证书未签发时（acme 未完成）选不出域名会跳过 curl 验证（WARN），不影响切换本身。
 
+### 交接清单（新会话必读——上下文清空后据此继续）
+
+- **继续顺序** = README-003 实施清单（第 6 节）7 → 8 → 9 → 10，每项规格见文档 3.9 / 4.1 / 第 5 节；✅/⏳ 状态标记以仓库内文档为准。
+- **分支**：b1。继续前先 `git pull` 或与远端同步。
+- **开发机 bj01 ≠ 部署目标**。部署目标是生产服务器 sg.cqcy.fun；本机**尚无** `.deployment-config`，首次 deploy/test 前创建：
+  ```bash
+  printf 'DEPLOYMENT_SERVER=work@sg.cqcy.fun\nDEPLOYMENT_PATH=/home/work/\n' > .deployment-config
+  ```
+  （`.deployment-config` 已被 .gitignore 忽略；test.sh/deploy.sh 均依赖它）
+- **git push 必须用 SSH URL**：本仓库 remote 是 HTTPS 且无凭据，直接 `git push` 报 "could not read Username"。用：
+  ```bash
+  git push git@github.com:alpha-86/laddr-docker.git b1
+  ```
+- **生产操作前置确认**：deploy、模式切换、`systemctl restart docker`、失败注入都在 sg 上执行，443 有秒级中断窗口——动手前向用户说明并确认。
+- **实测前先查远端状态**：`ssh work@sg.cqcy.fun "cd /home/work/laddr-docker && cat .env | grep COMPOSE_FILE && docker ps -a --format '{{.Names}}'"`——远端 .env 的 COMPOSE_FILE 与 haproxy 容器有无决定走迁移路径还是普通部署，以及当前模式判定。
+- 环境其他注意事项见本文件"已知风险 / 待实测确认"一节；外网访问代理设置见 CLAUDE.md。
+
 ### 提交记录
 
 - `2b6de21` docs: 003 设计文档初版（一轮 review 前）
