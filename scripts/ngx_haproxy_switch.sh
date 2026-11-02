@@ -260,42 +260,31 @@ check_converged() {
     $ok && return 0 || return 1
 }
 
-# ---- 新请求验证（时间窗匹配本次日志，不用旧日志） ----
+# ---- 新请求验证（偏移量方案：只匹配本次请求后追加的日志，不用旧日志） ----
+# curl 统一走 ${CURL_BIN:-curl}——测试可用 CURL_BIN=/path/to/stub 注入失败（见 README-003 3.8）
 verify_new_request() {
-    local mode="$1" domain mark attempt log_line route_want
+    local mode="$1" domain attempt log_line route_want log_file pos
     domain="$(pick_verify_domain)" || {
         log_warn "无法从证书选出验证域名，跳过 curl 验证（已做端口/容器校验）"
         return 0
     }
 
     if [ "$mode" = "nginx" ]; then
-        route_want="backend:ngx"
+        route_want="backend:ngx"; log_file="log/nginx_stream.log"
     else
-        route_want="ngx_backend"
+        route_want="ngx_backend"; log_file="log/haproxy_access.log"
     fi
+    [ -f "$log_file" ] || touch "$log_file" 2>/dev/null || true
 
     for attempt in 1 2 3; do
-        mark="$(date +%H:%M:%S)"
-        log_info "  发起验证请求 ($attempt/3): https://$domain/ (期望路由 → $route_want)"
-        curl -sk --max-time 10 --resolve "$domain:443:127.0.0.1" \
+        pos=$(wc -c < "$log_file" 2>/dev/null || echo 0)
+        log_info "  发起验证请求 ($attempt/3): https://$domain/ (期望路由 → $route_want, 日志偏移 $pos)"
+        "${CURL_BIN:-curl}" -sk --max-time 10 --resolve "$domain:443:127.0.0.1" \
             "https://$domain/?switchcheck=$RANDOM" >/dev/null 2>&1 || { sleep 2; continue; }
 
         sleep 1  # 等待日志落盘
-        if [ "$mode" = "nginx" ]; then
-            log_line="$(grep "sni:$domain" log/nginx_stream.log 2>/dev/null | tail -5 | while read -r line; do
-                t="$(echo "$line" | grep -o 'T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' | head -1 | tr -d 'T')"
-                if [ -n "$t" ] && { [ "$t" = "$mark" ] || [ "$t" \> "$mark" ]; }; then
-                    echo "$line"; break
-                fi
-            done)"
-        else
-            log_line="$(grep "sni:$domain" log/haproxy_access.log 2>/dev/null | tail -5 | while read -r line; do
-                t="$(echo "$line" | grep -o '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' | head -1)"
-                if [ -n "$t" ] && { [ "$t" = "$mark" ] || [ "$t" \> "$mark" ]; }; then
-                    echo "$line"; break
-                fi
-            done)"
-        fi
+        # 只检查 pos 之后追加的新内容；时间戳仅作辅助展示，不作判定
+        log_line="$(tail -c +$((pos + 1)) "$log_file" 2>/dev/null | grep "sni:$domain" | tail -1)"
 
         if [ -n "$log_line" ]; then
             if echo "$log_line" | grep -q "$route_want"; then
@@ -305,7 +294,7 @@ verify_new_request() {
                 log_warn "  日志行路由目标不符（期望 $route_want）: $log_line"
             fi
         else
-            log_warn "  未找到时间晚于 $mark 的新路由日志"
+            log_warn "  本次请求未产生新路由日志（sni:$domain）"
         fi
         sleep 2
     done
@@ -336,6 +325,7 @@ rollback() {
         [ -f "$BAK_DIR/xray.stream" ] && atomic_replace "$BAK_DIR/xray.stream" "$ACTIVE_FILE"
         docker compose restart nginx >/dev/null 2>&1
         if wait_443_owner nginx 30; then
+            rm -rf "$BAK_DIR"   # 回滚成功：系统状态与原一致，备份无保留价值
             log_ok "回滚完成：已恢复 nginx 模式，443 由 nginx 监听"
             return 0
         fi
@@ -348,6 +338,7 @@ rollback() {
         wait_443_free 30 || true
         docker compose up -d >/dev/null 2>&1
         if haproxy_container_running && wait_443_owner haproxy 30; then
+            rm -rf "$BAK_DIR"   # 回滚成功：系统状态与原一致，备份无保留价值
             log_ok "回滚完成：已恢复 haproxy 模式，443 由 haproxy 监听"
             return 0
         fi
@@ -477,6 +468,7 @@ main() {
             log_warn "未完全收敛，开始执行切换/修复...（备份: $BAK_DIR）"
             echo ""
             if [ "$target" = "nginx" ]; then switch_to_nginx; else switch_to_haproxy; fi
+            rm -rf "$BAK_DIR"   # 切换成功：清理含 .env 的备份，避免敏感备份长期积累
             echo ""
             log_ok "完成。可用 scripts/ngx_haproxy_switch.sh status 查看状态"
             echo ""

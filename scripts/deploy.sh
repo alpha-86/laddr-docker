@@ -83,11 +83,42 @@ main() {
     ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && sh gen_env.sh" 2>&1
     log_success ".env 文件生成完成"
 
+    # 检测入口模式与旧结构（README-003 3.9）：
+    # 远端 haproxy 容器存在 且 远端 .env COMPOSE_FILE 不含 docker-compose-haproxy.yml
+    # → 旧结构（haproxy 原本定义在主 compose 里），需要显式迁移
+    echo ""
+    log_info "检测入口模式与旧结构..."
+    local remote_compose_file=$(ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && grep '^COMPOSE_FILE=' .env | cut -d'=' -f2-" 2>/dev/null)
+    local legacy_haproxy=$(ssh "$DEPLOYMENT_SERVER" "docker ps -aq --filter 'name=^haproxy\$'" 2>/dev/null)
+
+    local entry_mode="nginx"
+    echo "$remote_compose_file" | grep -q 'docker-compose-haproxy.yml' && entry_mode="haproxy"
+
+    local migrating=false
+    if [ -n "$legacy_haproxy" ] && [ "$entry_mode" = "nginx" ]; then
+        migrating=true
+        log_info "检测到旧版 HAProxy 容器（.env 未启用 docker-compose-haproxy.yml）→ 走迁移路径"
+    else
+        log_info "入口模式: $entry_mode（无迁移需求）"
+    fi
+
     # 重启容器
     echo ""
-    log_info "重启容器..."
-    ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && docker compose stop && docker compose up -d" 2>&1 | grep -v "^$"
-    log_success "容器重启完成"
+    if [ "$migrating" = true ]; then
+        # 迁移顺序：全部 stop（消除"xray 已 REQUIRE PP 而旧 haproxy 还在转发"的混合状态）
+        # → 显式删除旧 haproxy 容器（compose up -d 不会移除 orphan，必须 docker rm）
+        # → 统一 up -d（新配置同批生效）
+        log_info "重启容器（含旧版 HAProxy 迁移：compose stop → docker rm haproxy → up -d）..."
+        ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && docker compose stop && { docker stop haproxy 2>/dev/null; docker rm haproxy 2>/dev/null; true; } && docker compose up -d" 2>&1 | grep -v "^$"
+        log_success "容器重启完成"
+        echo ""
+        log_info "迁移完成：旧 HAProxy 容器已删除，当前为 Nginx 默认入口；"
+        log_info "如需 HAProxy 入口，部署后在服务器执行: scripts/ngx_haproxy_switch.sh haproxy"
+    else
+        log_info "重启容器..."
+        ssh "$DEPLOYMENT_SERVER" "cd $REMOTE_PATH && docker compose stop && docker compose up -d" 2>&1 | grep -v "^$"
+        log_success "容器重启完成"
+    fi
 
     # 等待容器初始化
     echo ""
@@ -103,8 +134,13 @@ main() {
     echo "$container_status"
     echo ""
 
-    # 检查每个必需容器的运行状态
-    local required=("haproxy" "nginx" "acme" "xray")
+    # 检查每个必需容器的运行状态（按入口模式判定，README-003 3.9）
+    local required=("nginx" "acme" "xray")
+    if [ "$entry_mode" = "haproxy" ]; then
+        required=("haproxy" "nginx" "acme" "xray")
+    fi
+    log_info "入口模式: $entry_mode（必需容器: ${required[*]}）"
+    echo ""
     local all_healthy=true
     local failed_containers=()
 
@@ -162,9 +198,20 @@ main() {
     echo "  # 查看容器状态"
     echo "  ssh $DEPLOYMENT_SERVER \"cd $REMOTE_PATH && docker ps\""
     echo ""
-    echo "  # 查看 HAProxy 日志"
-    echo "  ssh $DEPLOYMENT_SERVER \"docker logs haproxy --tail 30\""
-    echo ""
+
+    if [ "$entry_mode" = "haproxy" ]; then
+        echo "  # 查看 HAProxy 日志"
+        echo "  ssh $DEPLOYMENT_SERVER \"docker logs haproxy --tail 30\""
+        echo ""
+    else
+        echo "  # Nginx 为默认 443 入口（stream 路由日志）"
+        echo "  ssh $DEPLOYMENT_SERVER \"tail -20 $REMOTE_PATH/log/nginx_stream.log\""
+        echo ""
+        echo "  # 如需切到 HAProxy 入口（443 秒级中断，自动回滚）"
+        echo "  ssh $DEPLOYMENT_SERVER \"cd $REMOTE_PATH && scripts/ngx_haproxy_switch.sh haproxy\""
+        echo ""
+    fi
+
     echo "  # 查看 Nginx 日志"
     echo "  ssh $DEPLOYMENT_SERVER \"docker logs nginx --tail 30\""
     echo ""

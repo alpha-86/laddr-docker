@@ -5,7 +5,7 @@
 **laddr-docker** is a sophisticated Docker-based proxy and load balancing infrastructure that combines multiple technologies to create a high-performance, SNI-aware reverse proxy system with SSL/TLS termination and certificate management.
 
 ### Key Features
-- **SNI-based intelligent routing** using HAProxy with regex pattern matching
+- **SNI-based intelligent routing** using Nginx stream (default entry) or HAProxy (optional, `docker-compose-haproxy.yml`), both with regex pattern matching
 - **Multi-protocol proxy support** via Xray (VLESS with XTLS-RPRX-Vision and XHTTP-REALITY)
 - **Automated SSL/TLS certificate management** with ACME.sh
 - **Centralized logging** with rsyslog integration
@@ -17,9 +17,10 @@
 ```
 Internet Traffic (Port 443)
          ↓
-    HAProxy (SNI Router)
+    ┌─ Nginx stream (default entry: ssl_preread SNI routing)
+    └─ HAProxy (optional entry: docker-compose-haproxy.yml)
     ├─ SNI Inspection & Regex Matching
-    ├─ Proxy Protocol v2 (preserves client IP)
+    ├─ Proxy Protocol (Nginx v1 / HAProxy v2, preserves client IP)
     ↓
     ├─→ Xray Backend (18910) - XTLS-RPRX-Vision
     ├─→ Xray XHTTP Backend (18911) - XHTTP-REALITY
@@ -35,15 +36,17 @@ Certificates (ACME.sh)
     └─ Deployed to Nginx via Docker hooks
 
 Logging (Centralized)
-    ├─ HAProxy → rsyslog → log/haproxy_access.log
+    ├─ HAProxy → rsyslog → log/haproxy_access.log (仅 HAProxy 模式)
+    ├─ Nginx stream → log/nginx_stream.log (仅 Nginx 入口模式)
     ├─ Nginx → log/nginx_access.log
     └─ Xray → log/xray_access.log
 ```
 
 ## Core Services
 
-### 1. HAProxy (Load Balancer & SNI Router)
-- **Role**: Main entry point for incoming HTTPS traffic on port 443
+### 1. HAProxy (Load Balancer & SNI Router) — 可选入口
+- **Status**: **Optional entry**, defined in `docker-compose-haproxy.yml` (not in default COMPOSE_FILE). The default 443 entry is **Nginx stream** (`nginx/conf/tcp_stream_params` + `conf.d/xray.stream` rendered by `scripts/render_stream.sh`). Switch online with `scripts/ngx_haproxy_switch.sh nginx|haproxy|status` (idempotent, auto-rollback; see `docs/README-003-nginx-haproxy-switch.md`)
+- **Role**: Alternative entry point for incoming HTTPS traffic on port 443
 - **Key Features**:
   - SNI-based intelligent routing using regex maps
   - TCP load balancing with proxy protocol v2 support
@@ -222,15 +225,15 @@ color: red
 
 ### Comprehensive Test Suite (`scripts/test.sh`)
 
-The testing framework provides 6 distinct test cases:
+The testing framework provides 8 distinct test cases. All cases auto-detect the remote entry mode (nginx default / haproxy optional, via remote `.env` COMPOSE_FILE) and assert route logs accordingly — nginx mode reads `log/nginx_stream.log` (`sni:`/`backend:$tcp_backend` fields), haproxy mode reads `log/haproxy_access.log` (`sni:`/`%b`). All route-log assertions use the **byte-offset scheme** (only log lines appended after the request counts; timestamps are auxiliary).
 
 #### Test Case 1: Container Health Check
 - Verifies all required containers are running
-- Checks: `haproxy`, `nginx`, `acme`, `xray`
+- Checks (by entry mode): `nginx`, `acme`, `xray` (+ `haproxy` in haproxy mode)
 
 #### Test Case 2: Port Listening Check
 - Validates service port bindings
-- HAProxy: 443 (HTTPS entry point)
+- 443 owner process must match entry mode (nginx / haproxy)
 - Nginx: 80 (HTTP), 8443 (HTTPS backend)
 - Xray: 18910 (Vision), 18911 (XHTTP)
 
@@ -240,9 +243,9 @@ The testing framework provides 6 distinct test cases:
 - Prepares domain lists for routing tests
 
 #### Test Case 4: SNI Routing to Nginx
-- Tests default routing path through HAProxy
+- Tests default routing path through the active entry
 - Creates test files and validates HTTP responses
-- Verifies HAProxy and Nginx logging integration
+- Verifies entry routing log (new-request offset assertion)
 
 #### Test Case 5: Xray Vision Proxy Test
 - **Advanced Proxy Testing**: Creates Xray client on remote host
@@ -254,6 +257,15 @@ The testing framework provides 6 distinct test cases:
 - **REALITY Protocol Testing**: Tests XHTTP with REALITY encryption
 - **Advanced Obfuscation**: Validates sophisticated proxy concealment
 - **Multi-Protocol Support**: Tests alternative proxy protocols
+
+#### Test Case 7: NF Routing + PP Compatibility
+- Constructs `nf.*` SNI; asserts route to `nf_xtls` (`backend:nf_xtls` / `nf_xtls_backend`) via offset polling after connection close
+- **PP assertion**: openssl TLS handshake must succeed (hard requirement); on failure reports "NF 握手失败，可能为 PP 版本或上游异常" — PP v1 incompatibility is only concluded when v2 (haproxy) succeeds and v1 (nginx) fails against the same upstream
+
+#### Test Case 8: External Real-Client IP Verification (acceptance gate)
+- Runs an Xray client from an **external jump host** (`--dep user@host`, default: local machine) through the server public IP
+- Cross-checks: entry log's observed source IP == `xray_access.log` `from` IP (PP-restored), must be equal and non-loopback
+- Server-local cases 5/6 cannot substitute (source is always 127.0.0.1); mandatory for both entry modes
 
 ### Intelligent Domain Selection
 The test framework automatically:

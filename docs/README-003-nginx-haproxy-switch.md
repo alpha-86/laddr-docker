@@ -246,7 +246,8 @@ scripts/ngx_haproxy_switch.sh nginx|haproxy|status
 - **渲染与 `nginx -t` 在释放当前 443 之前完成**：`nginx -t` 只校验磁盘文件，不影响运行态内存配置，HAProxy/nginx 持 443 期间可安全执行；此步失败即恢复原文件退出，**服务零影响**；
 - 容器操作**直操 docker**（`docker stop haproxy && docker rm -f haproxy`），不依赖 COMPOSE_FILE 是否识别该服务——半完成状态下 compose 可能已不认识 haproxy，`docker compose stop haproxy` 会报 `no such service`；
 - 每个操作按实际状态分支：容器不存在则跳过，文件缺失则重建；
-- 所有等待/端口/curl 校验均有超时（默认 30s、间隔 2s）与重试（curl 3 次）。
+- 所有等待/端口/curl 校验均有超时（默认 30s、间隔 2s）与重试（curl 3 次）；
+- **备份目录的清理（review 补充）**：切换成功 → 收尾时 `rm -rf` 备份目录；切换失败但**回滚成功** → 同样清理（回滚后的系统状态与原一致，备份无保留价值）；仅当**回滚自身失败**（退出码 2）时保留备份目录并在错误信息中给出路径——避免含 `.env` 的敏感备份在 `/tmp` 长期积累。
 
 **切换到 nginx**：
 
@@ -280,8 +281,10 @@ scripts/ngx_haproxy_switch.sh nginx|haproxy|status
 2. 优先取通配符 SAN（`*.example.com` / `*.ddx.cqcy.fun` 均可）：去掉 `*.` 前缀，构造 `sw<随机数>.<基域>`，并校验该域名确实被某条 SAN 覆盖（后缀匹配；`domain_covered` 函数）；
 3. 无通配符 SAN：选证书中已存在、**不满足任何路由前缀规则**（x|xyz|api|dt|ai|web|app|cdn|nf|netflix|nfx|nfv）**且不等于 `${REALITY_DEST}`** 的域名（保证走默认 nginx 后端）；
 4. 都选不出 → 跳过 curl 验证（WARN，已做端口/容器校验），不因无法验证而误回滚；
-5. 每次 curl 前刷新时间标记 `mark=$(date +%H:%M:%S)`；`curl -sk --max-time 10 --resolve <域名>:443:127.0.0.1`；查询串带随机数；
-6. 日志断言只接受**时间 ≥ mark 且 SNI = 构造域名**的新行：nginx 模式断言 `backend:ngx`（stream log 的 `$tcp_backend` 字段），haproxy 模式断言 `%b` = `ngx_backend`；3 次重试间隔 2s。
+5. 请求前记录日志位置标记 `pos=$(wc -c < <日志文件>)`（字节偏移）；`curl -sk --max-time 10 --resolve <域名>:443:127.0.0.1`；查询串带随机数；每次重试前**同时刷新 pos 与构造新随机子域**（无通配符 SAN 复用同一域名时也能区分本次请求）；
+6. 日志断言只检查 **pos 之后追加的新内容**（`tail -c +$((pos+1))`），其中找 SNI = 构造域名的行；时间戳（`THH:MM:SS` / `HH:MM:SS`）只作**辅助**展示，不作判定条件——彻底规避同秒历史记录误匹配与跨午夜比较失效；nginx 模式断言 `backend:ngx`（`$tcp_backend` 字段），haproxy 模式断言 `%b` = `ngx_backend`；3 次重试间隔 2s。
+
+> 切换脚本与 test.sh 的所有"新请求日志验证"统一用此**偏移量方案**（review 3）。
 
 ### 3.9 `scripts/deploy.sh`：模式感知 + 显式迁移（review 3/4，二轮修订）
 
@@ -318,16 +321,16 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
   - **时间窗断言**：case 4/5 补 case 6 同款逻辑——请求发起前记录时间标记，只接受时间 ≥ 标记的新日志行（iso8601 取 `THH:MM:SS` 做零填充字符串比较），禁止 `tail -1` 旧日志冒充成功。
 - **新增 case 7（NF 路由 + PP 兼容性，两种模式，二轮 review 重写）**——**路由断言与 PP 断言分离**：
   - 构造 `nf.<四级通配域>` SNI（复用现有动态构造逻辑；证书无可用通配则跳过并警告）；
-  - `echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername <域名>` 发起连接——**连接关闭靠 stdin EOF 主动触发**（nginx stream 与 haproxy 的 access log 都在**连接结束**时写入，不是 ClientHello 即记日志），随后**轮询**日志最多 10s；
+  - `echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername <域名>` 发起连接——**连接关闭靠 stdin EOF 主动触发**（nginx stream 与 haproxy 的 access log 都在**连接结束**时写入，不是 ClientHello 即记日志）；请求前记录日志文件**字节偏移 pos**，连接关闭后只检查 pos 之后追加的内容（**偏移量方案**），轮询最多 10s；
   - **路由断言**：nginx 模式查 `backend:nf_xtls`，haproxy 模式查 `nf_xtls_backend`；
-  - **PP 兼容性断言**：openssl s_client 返回码 0（TLS 握手成功）为**硬性要求**——"握手成败均可"只能证明路由、不能证明 NF 端接受 PP；"仅路由成功但握手失败"即判定 PP v1 不兼容并判失败。`NF_XTLS_SERVER` 为本地 vision（默认 127.0.0.1:18910）时天然接受 v1/v2；指向远端（如 hk01:18912）时本用例即远端 PP v1 兼容性的实测证据（haproxy 模式为 v2 对照组）。
+  - **PP 兼容性断言**：openssl s_client 返回码 0（TLS 握手成功）为**硬性要求**——"握手成败均可"只能证明路由、不能证明 NF 端接受 PP；握手失败即判用例失败并阻断验收，**但原因报告为"NF 握手失败，可能为 PP 版本或上游异常"，不能直接定性为 PP v1 不兼容**（上游宕机、证书/TLS 配置、网络或 SNI 问题同样会失败）；**仅当同一 NF 上游下 haproxy 模式（PP v2）握手成功而 nginx 模式（PP v1）握手失败时，才将 PP v1 兼容性列为主要嫌疑**；`NF_XTLS_SERVER` 为本地 vision（默认 127.0.0.1:18910）时天然接受 v1/v2；指向远端（如 hk01:18912）时本用例即远端 PP v1 兼容性的实测证据（haproxy 模式为 v2 对照组）。
 
-### 4.2 日志中的客户端 IP 验证（二轮 review 修正：区分流量路径）
+### 4.2 日志中的客户端 IP 验证（三轮 review 修正：外部验证为强制验收项）
 
-普通 HTTPS curl 走默认 nginx 后端，**不会产生 xray 日志**——原方案"普通 curl 后检查 xray_access.log"是错误路径。IP 验证必须分两条：
+普通 HTTPS curl 走默认 nginx 后端，**不会产生 xray 日志**——原方案"普通 curl 后检查 xray_access.log"是错误路径。IP 验证必须分两条，且**第二条强制从服务器之外的机器执行**：
 
 1. **默认 HTTPS 请求**（两模式同路径）：从服务器之外的机器（开发机）`curl https://<默认路由域名>`（走服务器公网 IP），检查 `log/nginx_access.log` 的 `$remote_addr`——经 `real_ip_header proxy_protocol` 还原后应为请求方公网 IP；
-2. **真实代理客户端请求**：用 test.sh case 5/6 的本地 xray 客户端（或真实客户端设备）走 Vision/XHTTP，检查 `log/xray_access.log` 的 `from <IP>`——两模式都应记录 PP 还原后的客户端地址（服务端本机发起的请求源是 127.0.0.1，无法区分 PP 是否生效，但 REQUIRE 策略下不带 PP 的连接会被直接拒绝，链路成功本身即证明 PP 被解析）。
+2. **真实代理客户端请求（强制）**：**必须从服务器之外**的客户端各执行一次 Vision 或 XHTTP 代理请求（开发机跑 xray 客户端指向服务器域名，或用真实设备），检查 `log/xray_access.log` 的 `from <IP>` 应为请求方公网 IP。**test.sh 的 case 5/6 在服务器本机发起，源地址恒为 127.0.0.1，只能证明 PP 必需头被接受（REQUIRE 策略下链路成功即证），不能证明外部客户端 IP 被正确还原——不得替代本项**。因此 test.sh 新增 **case 8**：ssh 到开发机（或其他外网跳板，`--dep` 参数指定）运行 xray 客户端经 Vision/XHTTP 出网请求一次，回连服务器日志按**偏移量方案**断言 `from <开发机公网IP>`；**case 8 为两种模式的验收门禁，必须通过**。
 
 字段名区分（文档/脚本注释统一）：HAProxy 日志来源字段是 `%ci`（log-format 自定义），nginx stream 日志是 `$remote_addr`，xray access log 是 `from`。
 
@@ -344,15 +347,15 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 2. **nginx 模式全量**：`test.sh` 全部用例（含新增 case 7）；
 3. **切到 haproxy**：`ngx_haproxy_switch.sh haproxy` → haproxy 模式全量 `test.sh`；
 4. **切回 nginx**：`ngx_haproxy_switch.sh nginx` → nginx 模式全量 `test.sh`（最终停在默认模式）；
-5. **NF + PP v1 实测**：case 7 的 PP 兼容性断言必须握手成功（`NF_XTLS_SERVER` 指向远端时即远端 PP v1 兼容性证据；**nginx 发 v1 与 HAProxy 发 v2 不能默认等价**）；
-6. **真实客户端 IP（两条路径）**：开发机经公网 IP 发默认 HTTPS 请求核 nginx_access.log；代理客户端请求核 xray_access.log 的 `from`——两模式各做一次；
-7. **新请求断言**：各次切换后的校验均发新请求且按时间窗匹配本次日志（应实现于切换脚本与 test.sh）；
+5. **NF + PP v1 实测**：case 7 的 PP 断言必须握手成功（`NF_XTLS_SERVER` 指向远端时即远端 PP v1 兼容性证据；**nginx 发 v1 与 HAProxy 发 v2 不能默认等价**）；握手失败时按 4.1 的归因规则报告（可能为 PP 版本或上游异常），只有 v2 对照成功 + v1 失败才定性 PP v1 不兼容；
+6. **真实客户端 IP（两条路径，外部验证为强制门禁）**：开发机经公网 IP 发默认 HTTPS 请求核 nginx_access.log；**从服务器之外的真实代理客户端**（test.sh case 8）走 Vision/XHTTP 核 xray_access.log 的 `from` 为外部公网 IP——两模式各做一次，**case 8 不通过则验收不通过**；服务器本机的 case 5/6 不可替代；
+7. **新请求断言**：各次切换后的校验均发新请求，且按**字节偏移量**只匹配本次追加的日志（时间戳仅作辅助展示）；应实现于切换脚本、test.sh case 4–8；
 8. **daemon 重启**：切到目标模式后 `sudo systemctl restart docker`，确认 443 只有目标入口监听、**无 haproxy 复活抢占**（容器已被 rm，非仅 stop）；
-9. **失败注入**（二轮 review 修正注入方式）：
+9. **失败注入**（二轮修正注入方式，三轮修正无效注入）：
    - **nginx -t 失败注入**：破坏 `xray.stream.ngx` 模板（写入非法指令；仅污染激活文件无效——切换渲染会立即覆盖它）→ 切 nginx → 应在第 2 步失败、零影响退出，原入口无损；恢复模板；
-   - **haproxy 启动失败注入**：临时占用 443（如 throwaway 容器 host 网络 bind 443）→ 切 haproxy → 应在启动/属主校验失败并自动回滚；解除占用；
-   - **curl 校验失败注入**：临时把 `.env` 的 DOMAIN_LIST 改为证书未覆盖的域名 → 验证步骤失败 → 应回滚；恢复 .env；
-10. **半完成修复**：人为制造三种半完成状态（只改 .env / 只换激活文件 / 只删容器），分别重跑 `switch <目标>`，均应自动收敛而非误报"已是目标模式"；对"目标=nginx 但 .env 已无 haproxy.yml 且容器已删"的极端状态同样可收敛。
+   - **haproxy 启动失败注入**（三轮修正：原"临时容器占用 443"方案不可行——切换前 443 由 nginx 持有，临时容器 bind 必失败，且残留占用会让回滚也失败）：改为**临时向 `haproxy.cfg.tpl` 写入非法指令** → 切换时 haproxy entrypoint 的 `haproxy -c` 校验失败、容器退出 → 切换脚本在"启动/属主校验"步失败 → **自动回滚到 nginx**；恢复模板后重跑 switch haproxy 应成功；
+   - **curl 校验失败注入**（三轮修正：验证域名取自**证书 SAN**而非 `.env` DOMAIN_LIST，改 DOMAIN_LIST 不会影响验证，此注入无效）：改为通过 **`CURL_BIN` 环境变量注入测试用 curl**（脚本内 curl 一律以 `${CURL_BIN:-curl}` 调用）——测试时 `CURL_BIN=/path/to/failing-curl-stub switch …`，stub 恒返回失败 → 验证步失败 → 应回滚；正式环境不设该变量即无影响，**不得通过破坏正式证书配置来制造失败**；
+10. **半完成修复**：人为制造三种半完成状态（只改 .env / 只换激活文件 / 只删容器），分别重跑 `switch <目标>`，均应自动收敛而非误报"已是目标模式"；对"目标=nginx 但 .env 已无 haproxy.yml 且容器已删"的极端状态同样可收敛；
 
 ## 6. 实施清单（开发顺序）
 
@@ -362,9 +365,9 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 4. `scripts/render_stream.sh`（新，含第二输出参数）。**✅ 已完成（本地干跑三种场景通过）**
 5. `gen_env.sh`：交互询问 + touch stream 日志 + 调用渲染。**✅ 已完成（语法检查通过，未实测交互）**
 6. `scripts/ngx_haproxy_switch.sh`（新，按 3.8 二轮修订版：nginx -t 前置、按模式回滚、直操 docker、证书 SAN 构造验证域名、/tmp 备份、flock、sudo ss 退化）。**✅ 已完成（语法检查通过，未经服务器实测）**
-7. `scripts/deploy.sh`：模式感知 + 迁移流程（按 3.9，直操 docker 删除旧容器）。**⏳ 未开始**
-8. `scripts/test.sh`：模式检测、case 1/2/4/5/6 分支 + 时间窗断言、新增 case 7（路由 + PP 握手双断言、连接关闭后轮询日志）。**⏳ 未开始**
-9. `README.md`、`CLAUDE.md`：双模式架构、快速开始（含 render 步骤）、切换脚本说明；清理"单一 HAProxy 架构"文案。**⏳ 未开始**
+7. `scripts/deploy.sh`：模式感知 + 迁移流程（按 3.9，直操 docker 删除旧容器）。**✅ 已完成（语法检查通过，未经服务器实测）**
+8. `scripts/test.sh`：模式检测、case 1/2/4/5/6 双模式分支 + **全部改用偏移量方案**（请求前记 pos，只查追加内容，时间戳仅辅助）、新增 case 7（NF 路由 + PP 握手双断言、stdin EOF 关连接后轮询新增日志、失败归因按 4.1）、新增 **case 8**（外部真实代理客户端 IP 验证，`--dep` 指定外网跳板，两种模式验收门禁）。**✅ 已完成（语法检查通过，未经服务器实测）**
+9. `README.md`、`CLAUDE.md`：双模式架构、快速开始（含 render 步骤）、切换脚本说明；清理"单一 HAProxy 架构"文案。**✅ 已完成**
 10. 按第 5 节验证计划实测并报告。**⏳ 未开始**
 
 > 实施进展详见 [003_worklog.md](003_worklog.md)（随开发滚动更新）。
@@ -385,4 +388,8 @@ deploy.sh **必须改造**（修正旧结论"deploy.sh 不变"）：
 | 渲染命令 | `scripts/render_stream.sh` 统一入口，gen_env/deploy/switch 复用；改 .env 后必须重渲染 |
 | 部署迁移 | deploy.sh 显式检测旧结构，`compose stop → docker stop/rm haproxy → compose up -d` |
 | 验证域名构造 | 从容器证书 SAN 选：优先通配符去 `*.` 构造随机子域（校验覆盖）；否则选非路由前缀、非 REALITY_DEST 的已覆盖 SAN |
+| 新请求日志断言 | **字节偏移量方案**（请求前记 pos，只查 pos 后追加内容），时间戳仅作辅助展示 |
+| 外部真实 IP 验证 | test.sh **case 8**（`--dep` 外网跳板跑真实代理客户端），两种模式验收门禁；本机 case 5/6 不可替代 |
+| curl 失败注入 | 脚本内 curl 以 `${CURL_BIN:-curl}` 调用，测试时注入失败 stub；不碰正式配置 |
+| 备份清理 | 切换成功或回滚成功即删 `/tmp` 备份目录；仅回滚失败保留并提示路径 |
 | 文档命名 | `docs/README-003-nginx-haproxy-switch.md`（沿用仓库惯例） |

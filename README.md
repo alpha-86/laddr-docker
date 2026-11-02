@@ -3,17 +3,22 @@
 
 ## 架构概览
 
+默认 **Nginx 直连 443**（stream ssl_preread 做 SNI 路由）；可选 **HAProxy 入口**（拆分为 `docker-compose-haproxy.yml`，默认不启用）：
+
 ```
 Internet (Port 443)
     ↓
-HAProxy (SNI Router)
+Nginx stream (默认) / HAProxy (可选)
     ├─→ Vision (18910)    - XTLS-RPRX-Vision
     ├─→ XHTTP (18911)     - XHTTP + REALITY
+    ├─→ NF XTLS           - ${NF_XTLS_SERVER}
     └─→ Nginx (8443)      - HTTPS/SSL Termination
 
 ACME.sh → 自动证书管理
-rsyslog → 集中式日志收集
+rsyslog → 集中式日志收集（仅 HAProxy 模式）
 ```
+
+两种入口都向下游发送 PROXY Protocol 保留真实客户端 IP；`scripts/ngx_haproxy_switch.sh` 支持在线互切（秒级中断、失败自动回滚）。
 
 ## 快速开始
 
@@ -84,11 +89,32 @@ DOMAIN_LIST="dns_ali:example.com;example2.com dns_cf:example3.com"
 ACME_SH_EMAIL=your_email@example.com
 ```
 
+> 修改 `REALITY_DEST` / `NF_XTLS_SERVER` / `COMPOSE_FILE` 后，必须重新渲染 stream 配置：
+
+```bash
+sh scripts/render_stream.sh
+```
+
 ### 3. 部署
 
 ```bash
 docker compose up -d
 ```
+
+## 入口模式切换（Nginx ↔ HAProxy）
+
+默认 Nginx 入口；`gen_env.sh` 初始化时可选择启用 HAProxy（`.env` 的 `COMPOSE_FILE` 追加 `:docker-compose-haproxy.yml`）。已部署服务器上在线切换：
+
+```bash
+# 查看当前模式/收敛状态
+scripts/ngx_haproxy_switch.sh status
+
+# 切换（幂等；秒级中断；任一步失败自动回滚到原模式）
+scripts/ngx_haproxy_switch.sh haproxy
+scripts/ngx_haproxy_switch.sh nginx
+```
+
+切换脚本收敛判据：`.env` COMPOSE_FILE、stream 激活文件、容器状态（nginx 模式下 haproxy 容器被删除以防 restart:always 复活抢 443）、443 实际监听者。设计详见 [docs/README-003-nginx-haproxy-switch.md](docs/README-003-nginx-haproxy-switch.md)。
 
 ## 生成客户端配置
 
