@@ -13,7 +13,7 @@
 |---|---|
 | 设计（README-003） | ✅ 定稿，经过 4 轮 review 修订（记录见第 4 节） |
 | 代码（实施清单 1–9） | ✅ 全部完成 |
-| 实测（实施清单 10） | ✅ 已完成（2026-11-03，sg 生产）——迁移/双模式全量/失败注入 ×3/半完成 ×3 全通过；实测暴露并修复 11 项问题（见第 9 节）；唯 daemon 重启一项 ⏳（work 无 sudo 免密，待人工执行，见第 2 节） |
+| 实测（实施清单 10） | ✅ 全部完成（2026-11-03，sg 生产）——迁移/双模式全量/失败注入 ×3/半完成 ×3/daemon 重启 443 独占全通过；实测暴露并修复 11 项问题（见第 9 节） |
 | 分支 | b1，本轮实测修复后以仓库为准 |
 
 **核心结论（审阅者必读，证据在设计文档 §2.3）**：
@@ -21,11 +21,9 @@ xhttp 入站可通过 `streamSettings.sockopt.acceptProxyProtocol` 接收 PROXY 
 
 ---
 
-## 2. runbook（已执行；保留备查）
+## 2. runbook（已执行完毕，保留备查）
 
-> ⚠️ 全部在 sg 生产执行，443 多次秒级中断。**2026-11-03 已按本 runbook 执行完毕**，结果记录在第 5 节；执行中发现的偏差与修复记录在第 9 节。唯一遗留：第 5 步 daemon 重启需 sudo 密码（sg 的 work 用户无免密 sudo），请在有终端的会话执行：
-> `! ssh -tt work@sg.cqcy.fun "sudo systemctl restart docker && sleep 15 && cd /home/work/laddr-docker && docker ps --format '{{.Names}}' && ss -tln | grep ':443 '"`
-> 预期：容器 nginx/xray/acme 拉起（无 haproxy），443 仅 nginx 监听（v4+v6 两条 LISTEN）。
+> ⚠️ 全部在 sg 生产执行，443 多次秒级中断。**2026-11-03 已按本 runbook 全部执行完毕（含第 5 步 daemon 重启验证：容器仅 nginx/xray/acme、443 由 nginx 独占）**，结果记录在第 5 节；执行中发现的偏差与修复记录在第 9 节。
 
 ```bash
 # 0. 远端现状摸底（决定 deploy 走不走迁移路径）
@@ -122,7 +120,7 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 | 5 NF + PP v1 握手实测 | ✅ | 两模式 openssl 握手均 rc=0 / Verify return code 0 (ok)（NF_XTLS_SERVER=127.0.0.1:18910 本地 vision，天然接受 v1/v2） | 11-03 |
 | 6 真实客户端 IP 两条路径 | ✅ | case 8 两模式均 seen_ip == from_ip == 168.138.212.150（非回环）；入口日志（marker SNI）与 xray from 交叉验证 | 11-03 |
 | 7 新请求偏移量断言 | ✅ | 切换脚本 verify_new_request 与 case 4–8 全部按字节偏移匹配 | 11-03 |
-| 8 daemon 重启后 443 独占 | ⏳ | work 用户无 sudo 免密（`sudo -n` 需密码）；重启前已确认 haproxy 容器是 rm 非 stop（无复活源）；待人工执行（命令见第 2 节） | |
+| 8 daemon 重启后 443 独占 | ✅ | `sudo systemctl restart docker` 后 15s：容器仅 nginx/xray/acme（haproxy 无复活），443 两条 LISTEN（v4+v6），nginx 独占 | 11-03 |
 | 9 失败注入 ×3 | ✅ | a) 破坏 xray.stream.ngx → 切 nginx：渲染过、nginx -t 败 → rc=1 零影响退出，443 无损；b) 破坏 haproxy.cfg.tpl → 切 haproxy：启动败 → 单次回滚 rc=3，恢复模板后重切成功；c) CURL_BIN=/bin/false → 验证步败 → 单次回滚 rc=3，终态 nginx | 11-03 |
 | 10 半完成修复 ×3 | ✅ | 7A 只改 .env → 收敛 rc=0；7B 只换激活文件 → 收敛 rc=0（初版脚本错滚致 443 掉线，修复 orig 透传后复测通过）；7C 只 docker rm haproxy → 重建收敛 rc=0 | 11-03 |
 
@@ -163,6 +161,8 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 
 **11-03 09:47 收尾复跑 nginx 全量 —— 22 通过/1 警告/0 失败**，确认最终状态：nginx 默认入口、443 v4+v6 监听、haproxy 容器不存在
 
+**11-03 daemon 重启验证（验证项 8，用户交互执行）**——`sudo systemctl restart docker` 后 15s：容器仅 `nginx xray acme`（haproxy 无复活抢占），443 两条 LISTEN 由 nginx 独占 → 验证项 10/10 全过，实施清单 10 闭环
+
 **case 8 归因细节（两模式通用证据形态）**：入口日志记录 marker SNI 连接（服务端视角源 IP）→ 本机 xray 客户端（SOCKS 11082，Vision）经公网出网 → xray_access.log 偏移后新行 `from <同一 IP> accepted tcp:www.google.com:443` ——三约束（源 IP 相等、目标 www.google.com:443、字节偏移之后）同时满足。注意 www.google.com 的解析必须发生在服务端（`--socks5-hostname`），bj01 本地 DNS 返回 `2001::1` 不可信（9-F10①）。
 
 ---
@@ -185,7 +185,7 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 
 - ~~**PP v1 vs v2**：nginx stream 发 PP v1、HAProxy 发 v2；本地 xray（go-proxyproto）两者都收；`NF_XTLS_SERVER` 指向远端时 v1 兼容性靠 case 7 实测~~ ✅ 已实测：case 7 两模式对本地 vision（127.0.0.1:18910）openssl 握手均成功（Verify 0）。`NF_XTLS_SERVER` 改指远端时本用例即远端兼容性证据（v1/v2 归因规则见 README-003 §4.1 不变）。
 - ~~`include tcp_stream_params;` 相对路径~~ ✅ 已实测可用（nginx 镜像 prefix 一致）。
-- **sg 的 work 用户无 `sudo -n` 免密**（`init_sys_rocky.sh` 的 sudoers 未覆盖该机）：切换脚本与 test.sh case 2 均按设计退化为 TLS 探测（WARN 不判失败）；daemon 重启验证需人工执行（命令见第 2 节）。
+- **sg 的 work 用户无 `sudo -n` 免密**（`init_sys_rocky.sh` 的 sudoers 未覆盖该机）：切换脚本与 test.sh case 2 均按设计退化为 TLS 探测（WARN 不判失败）；需 root 的操作（如 daemon 重启）由用户交互执行（2026-11-03 已执行，结果见第 5 节验证项 8）。
 - ~~切换脚本的 `pick_verify_domain` 依赖证书可读~~ 未触发（证书有效，WARN 分支未走到）。
 - case 8 本机直跑前置（docker/curl/openssl、11082 空闲、bj01→sg 443 可达）✅ 实测满足；`--dep` 模式未实测（无跳板需求）。
 - ~~case 8 marker 直连握手预期失败但入口仍记录~~ 实测：marker SNI 取自证书覆盖范围，vision 握手成功且入口日志正常记录；真正未知 SNI（rejectUnknownSni）下入口是否记录未验证，不影响断言。
