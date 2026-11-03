@@ -60,9 +60,10 @@ Logging (Centralized)
 - Default → Nginx backend (port 8443)
 
 ### 2. Nginx (Web Server & SSL Proxy)
-- **Role**: Default HTTP/HTTPS server and reverse proxy
+- **Role**: **Default 443 entry** (stream `ssl_preread` SNI routing) + HTTP/HTTPS server and reverse proxy
 - **Key Features**:
-  - Listens on port 8443 with SSL/TLS support
+  - Stream 443 entry: SNI regex routing to 4 backends (map in rendered `conf.d/xray.stream`), PROXY Protocol v1 to upstreams, route log `log/nginx_stream.log`
+  - Listens on port 8443 (SSL backend) and 80 (HTTP); 443 in stream context
   - Proxy protocol v2 support for preserving client IP
   - PHP-FPM support (fastcgi on port 9000)
   - Waits for SSL certificates before starting
@@ -90,11 +91,12 @@ Logging (Centralized)
 
 ```
 /laddr-docker/
-├── docker-compose.yml              # Main service definitions
+├── docker-compose.yml              # Main service definitions (nginx default entry)
 ├── docker-compose-xray.yml         # Xray-specific service definition
-├── gen_env.sh                      # Environment setup (creates dirs + generates .env)
+├── docker-compose-haproxy.yml      # Optional HAProxy entry (enabled via COMPOSE_FILE)
+├── gen_env.sh                      # Environment setup (creates dirs + generates .env + renders stream)
 ├── .env                            # Environment configuration (generated)
-├── .deployment-config              # Deployment server configuration
+├── .deployment-config              # Deployment server configuration (local only, gitignored)
 │
 ├── haproxy/                        # HAProxy configuration
 │   ├── haproxy.cfg.tpl            # HAProxy config template
@@ -104,17 +106,21 @@ Logging (Centralized)
 │
 ├── nginx/                          # Nginx configuration
 │   ├── conf/
-│   │   ├── nginx.conf             # Main Nginx config
-│   │   ├── server_params          # SSL/proxy protocol settings
+│   │   ├── nginx.conf             # Main Nginx config (includes tcp_stream_params)
+│   │   ├── server_params          # SSL/proxy protocol settings (ssl_certificate = default_full.pem)
+│   │   ├── tcp_stream_params      # stream{} skeleton: log_format + include conf.d/*.stream
 │   │   └── conf.d/
-│   │       └── default.conf       # Server block config
+│   │       ├── default.conf       # HTTP server block (80)
+│   │       ├── xray.stream.ngx    # Nginx-entry 443 SNI routing template (rendered)
+│   │       ├── xray.stream.haproxy# HAProxy-entry stub (map-only, no 443 listener)
+│   │       └── xray.stream        # ACTIVE stream file (rendered by render_stream.sh, gitignored)
 │   ├── script/
 │   │   └── reload.sh              # Certificate reload script
 │   └── entrypoint.sh              # Nginx startup script (waits for certs)
 │
 ├── xray/                           # Xray proxy configuration
 │   ├── etc/
-│   │   ├── config.json.tpl        # Main Xray config template
+│   │   ├── config.json.tpl        # Main Xray config template (xhttp acceptProxyProtocol)
 │   │   ├── config.json.tpl.client # Client config variant
 │   │   ├── config.json.tpl.dns    # DNS config variant
 │   │   └── config.json.tpl.nf     # Netflix config variant
@@ -125,22 +131,26 @@ Logging (Centralized)
 │
 ├── html/                           # Static web content
 │
-├── scripts/                        # Deployment and testing
-│   ├── deploy.sh                  # Remote deployment script
-│   └── test.sh                    # Testing framework
+├── scripts/                        # Deployment, switching and testing
+│   ├── deploy.sh                  # Remote deployment (mode-aware, legacy migration path)
+│   ├── render_stream.sh           # Render active xray.stream by entry mode
+│   ├── ngx_haproxy_switch.sh      # Online entry switch nginx|haproxy|status (idempotent, auto-rollback)
+│   ├── gen_xray_client_cfg.sh     # Client config generator (vision|xhttp)
+│   └── test.sh                    # Testing framework (cases 1-8, mode-aware)
+│
+├── docs/                           # Design docs & worklog
+│   ├── README-003-nginx-haproxy-switch.md  # 双入口设计规格（唯一规格来源）
+│   └── 003_worklog.md                      # 003 开发/实测进展与交接清单
 │
 └── .claude/                        # Claude Code configuration
-    ├── settings.local.json        # Claude permissions and settings
-    └── agents/
-        └── deployment-tester.md   # Deployment testing agent
+    └── settings.local.json        # Claude permissions and settings
 ```
-
 ## Claude Code Integration
 
 ### Network Configuration
 
 #### Proxy Settings for Web Access
-All web queries and external network access should use the configured proxy:
+开发机（bj01）访问境外网络需要走本地代理（bj01 上常驻 xray 客户端容器提供）：
 
 ```bash
 export http_proxy=http://127.0.0.1:1087
@@ -149,13 +159,11 @@ export ALL_PROXY=socks5://127.0.0.1:1080
 ```
 
 **CRITICAL REMINDER**:
-- **USE Google Search Script**: `/Users/chenchao/Documents/code/laddr-docker/.claude/agents/google-search.sh "search query"` - This script automatically handles proxy settings
 - **NEVER use WebSearch tool directly** - It will fail without proper proxy configuration
 - **For WebFetch operations** - Set proxy environment variables first using Bash tool
 - **Environment Variables Location** - .env file is on the SERVER, not local machine. Use SSH to access server files
-- **Google Script Location**: `.claude/agents/google-search.sh` (moved from project root to proper location)
-
-**Important**: These proxy settings must be applied before any WebSearch, WebFetch, or external network operations to ensure proper connectivity through the local proxy infrastructure.
+- **注意**：旧文档提到的 `.claude/agents/google-search.sh` 已不存在（随旧开发机移除）；需要搜索时用 `curl` 走上述代理或借助其他工具
+- **bj01 本地 DNS 污染境外域名**（实测 `www.google.com → 2001::1`）：涉及境外域名解析的场景必须让远端解析（如 `--socks5-hostname`），不要信任本机解析结果
 
 ### Configuration Files
 
@@ -168,12 +176,10 @@ Contains permissions for Claude Code to interact with the project:
     "allow": [
       "Bash(git config:*)",
       "Bash(./scripts/deploy.sh:*)",
-      "Bash(/Users/chenchao/Documents/code/laddr-docker/scripts/deploy.sh)",
-      "Bash(ssh work@sg.cqcy.fun \"cd /home/work/laddr-docker && docker ps\")",
+      "Bash(./scripts/test.sh:*)",
+      "Bash(timeout 180 ./scripts/test.sh:*)",
       "Bash(ssh:*)",
       "WebSearch",
-      "Bash(./scripts/test.sh:*)",
-      "Bash(gtimeout 180 ./scripts/test.sh:*)",
       "WebFetch(domain:xtls.github.io)"
     ]
   }
@@ -187,22 +193,7 @@ Contains permissions for Claude Code to interact with the project:
 - **Git Operations**: Version control management
 - **Web Resources**: Fetch documentation from XTLS project
 
-#### `.claude/agents/deployment-tester.md`
-Defines a specialized agent for deployment testing:
-
-```yaml
----
-name: deployment-tester
-description: "Simple test runner for laddr-docker project. Runs test.sh locally first. Only deploys when explicitly requested by user."
-model: inherit
-color: red
----
-```
-
-**Agent Capabilities**:
-- **Focused Testing**: Runs specific test cases (e.g., "测试case5.1" → `./scripts/test.sh --case 5.1`)
-- **Controlled Deployment**: Only deploys when explicitly requested by user
-- **Simple Workflow**: Execute scripts and show all output without complex decision-making
+> 注：旧版 `.claude/agents/deployment-tester.md` 自定义 agent 已随仓库清理移除，测试直接执行 `./scripts/test.sh --case <n>` 即可。
 
 ## Deployment Workflow
 
@@ -220,6 +211,7 @@ color: red
 - **Template Processing**: Configuration files use template substitution
 - **Certificate Management**: Automated provisioning and deployment
 - **Service Dependencies**: Proper startup ordering with health checks
+- **副作用提示**: deploy.sh 每次部署都会在远端执行 `gen_env.sh`，从而按 `.env` 当前模式**重新渲染** `nginx/conf/conf.d/xray.stream` 激活文件——可顺带修复激活文件的磁盘漂移，但不要依赖它做模式切换（切换用 `ngx_haproxy_switch.sh`）
 
 ## Testing Framework
 
@@ -233,7 +225,7 @@ The testing framework provides 8 distinct test cases. All cases auto-detect the 
 
 #### Test Case 2: Port Listening Check
 - Validates service port bindings
-- 443 owner process must match entry mode (nginx / haproxy)
+- 443 owner process must match entry mode (nginx / haproxy); **无 sudo 时属主不可见，退化为"443 监听 + TLS 握手"探测并记 WARN（不判失败）**——sg 的 work 用户无免密 sudo
 - Nginx: 80 (HTTP), 8443 (HTTPS backend)
 - Xray: 18910 (Vision), 18911 (XHTTP)
 
@@ -263,9 +255,11 @@ The testing framework provides 8 distinct test cases. All cases auto-detect the 
 - **PP assertion**: openssl TLS handshake must succeed (hard requirement); on failure reports "NF 握手失败，可能为 PP 版本或上游异常" — PP v1 incompatibility is only concluded when v2 (haproxy) succeeds and v1 (nginx) fails against the same upstream
 
 #### Test Case 8: External Real-Client IP Verification (acceptance gate)
-- Runs an Xray client from an **external jump host** (`--dep user@host`, default: local machine) through the server public IP
+- Runs an Xray client from an **external machine** through the server public IP (default: runs directly on the machine executing test.sh; `--dep user@host` for a jump host)
 - Cross-checks: entry log's observed source IP == `xray_access.log` `from` IP (PP-restored), must be equal and non-loopback
 - Server-local cases 5/6 cannot substitute (source is always 127.0.0.1); mandatory for both entry modes
+- **域名前置**：测试域名必须公网可解析（证书覆盖 ≠ DNS 有记录，部分子域无通配符解析）；选型已内置"执行机可解析"过滤，前置不满足判 FAIL 明示
+- **远端解析**：curl 必须 `--socks5-hostname`（域名交服务端解析）——bj01 本地 DNS 污染境外域名，本地解析会把污染 IP 发给代理导致归因失配
 
 ### Intelligent Domain Selection
 The test framework automatically:
@@ -351,13 +345,24 @@ REALITY_DEST=www.fifa.com
 ./scripts/test.sh --case xhttp
 ```
 
-#### 3. Using Claude Code Agents
+#### 3. 定向测试命令
 ```bash
-# Activate the deployment-tester agent
-# Then use commands like:
-测试case5.1    # Runs specific test case
-deploy         # Triggers deployment + testing
+./scripts/test.sh --case 1       # 容器健康
+./scripts/test.sh --case vision  # Xray Vision 代理
+./scripts/test.sh --case xhttp   # Xray XHTTP 代理
+./scripts/test.sh --case 8       # 外部真实客户端 IP（验收门禁）
 ```
+
+#### 4. Entry Mode Switching (on the server)
+```bash
+# 查看当前模式与收敛状态
+ssh work@sg.cqcy.fun "cd /home/work/laddr-docker && scripts/ngx_haproxy_switch.sh status"
+
+# 在线切换（幂等、半完成自修复、失败自动回滚；443 秒级中断）
+ssh work@sg.cqcy.fun "cd /home/work/laddr-docker && scripts/ngx_haproxy_switch.sh haproxy"
+ssh work@sg.cqcy.fun "cd /home/work/laddr-docker && scripts/ngx_haproxy_switch.sh nginx"
+```
+退出码：`0` 成功/已是目标；`1` 渲染/nginx -t 前置失败（零影响）；`2` 回滚后仍不通过（需人工）；`3` 失败但已自动回滚。详见 README.md「入口模式切换」与设计文档 docs/README-003。
 
 ### Monitoring and Troubleshooting
 
@@ -365,8 +370,9 @@ deploy         # Triggers deployment + testing
 ```bash
 # Centralized logs directory
 ${DOCKER_BOX_HOME}/log/
-├── haproxy_access.log    # HAProxy routing logs
+├── haproxy_access.log    # HAProxy routing logs (仅 HAProxy 模式)
 ├── haproxy_error.log     # HAProxy error logs
+├── nginx_stream.log      # Nginx stream 443 路由日志 (仅 Nginx 入口模式)
 ├── nginx_access.log      # Nginx request logs
 ├── nginx_error.log       # Nginx error logs
 └── xray_access.log       # Xray proxy logs
@@ -389,12 +395,14 @@ ss -tlnp | grep -E ':(80|443|8443|18910|18911)'
 
 #### Certificate Management
 ```bash
-# Check certificate validity
-docker exec nginx openssl x509 -in /etc/nginx/cert/default_cert.pem -noout -text
+# Check certificate validity (注意：服务端出示的是 fullchain default_full.pem)
+docker exec nginx openssl x509 -in /etc/nginx/cert/default_full.pem -noout -text
 
 # Manual certificate renewal
 docker exec acme acme.sh --renew-all
 ```
+
+> **SSL 关键约束**：服务端必须出示**完整证书链**——nginx `ssl_certificate` 与 xray `certificateFile` 都用 `default_full.pem`（acme.sh docker hook 部署；`default_cert.pem` 仅为 leaf）。**禁止 `allowInsecure`**（用户硬性要求；xray 26.x 已移除该特性，配置含它直接拒载），客户端校验依赖完整链。
 
 ## Security Considerations
 
@@ -518,10 +526,10 @@ docker-compose down && docker-compose up -d
 
 ## Claude Code Best Practices
 
-### 1. Using the Deployment Agent
-- **Focused Commands**: Use specific test case commands
-- **Clear Intent**: State whether you want testing or deployment
-- **Error Handling**: Agent will show all script output for debugging
+### 1. 定向测试与部署
+- **Focused Commands**: 直接执行 `./scripts/test.sh --case <n>`（见上文章节编号）；部署用 `./scripts/deploy.sh`
+- **Clear Intent**: 明确说明要测试还是部署（部署会重启远端服务、443 秒级中断）
+- **Error Handling**: 脚本输出全量展示，按 FAIL 行的下一段 INFO 定位（测试脚本会把客户端启动日志、错误日志路径一并打印）
 
 ### 2. Permission Management
 - **Minimal Permissions**: Only grant necessary access
@@ -535,7 +543,7 @@ docker-compose down && docker-compose up -d
 
 ## Conclusion
 
-The laddr-docker project provides a sophisticated, production-ready proxy infrastructure with comprehensive automation and testing capabilities. The Claude Code integration enhances operational efficiency through intelligent agents and streamlined deployment workflows.
+The laddr-docker project provides a sophisticated, production-ready proxy infrastructure with comprehensive automation and testing capabilities. The Claude Code integration enhances operational efficiency through streamlined deployment and testing workflows.
 
 Key strengths:
 - **Modular Architecture**: Clean separation of concerns
