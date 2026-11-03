@@ -231,7 +231,19 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 
 ### 10.1 acme：CA 策略拍板 + 新增 force_switch_ca.sh
 
-> **规格唯一来源：[README-004-acme-ca-switch.md](README-004-acme-ca-switch.md)**（背景对比/方案决策/设计/验证/使用手册全在其中），本节仅记进展。
+> **规格唯一来源：[README-004-acme-ca-switch.md](README-004-acme-ca-switch.md)**（背景对比/方案决策/设计/验证/使用手册全在其中），本节记决策要点与实测 case 明细。
 
 - 对比 docker-box 与 laddr acme 体系：仅两处差异（ssl.sh 默认 CA 设置时机；docker-box 有 force 迁移脚本）。讨论后拍板：**方案 A 维持 laddr 初始化语义**（初始化默认 LE、尊重环境历史，不引入每次强制）+ 新增通用 `acme/force_switch_ca.sh`（`--renew --force --server <CA>` 强制切换存量证书到任意 CA）；不钉 acme.sh 镜像版本。
-- 交付：新脚本 + compose 一行挂载（纯新增，零删除）；sg 实测 usage 错误路径与 letsencrypt 端到端全过（详见 README-004 §4）。
+- 交付：新脚本 + compose 一行挂载（纯新增 152 行/0 删除，commit `f9c7401`）。
+
+**force_switch_ca.sh 实测 case 明细（2026-11-03，sg）**：
+
+| # | Case | 结果与证据 |
+|---|---|---|
+| 1 | 无参调用（参数校验） | 打印用法 + exit 1 ✅ |
+| 2 | 切 letsencrypt 端到端 | 域名展开正确（主域名 cqcy.ltd + 27 SAN）→ `--renew --force --server letsencrypt` 强制重签 → deploy-hook 重部署 4 文件（含 fullchain）+ reload（nginx reload + 重启 xray）→ `--set-default-ca` 生效 → `acme.sh --list` CA=LetsEncrypt.org、新 Created/Renew ✅ |
+| 3 | 服务端出示新证书 | 443 握手 notBefore=Nov 3 / notAfter=2027-02-01 / 中间体 YE1→YE2（确证新签）✅ |
+| 4 | 代理链路回归 | test.sh case 5（Vision，禁 allowInsecure 严格校验 + 完整链）全过 ✅ |
+| 5 | （顺带）正常续期闭环 | 部署触发的容器重建跑例行 `--issue`，命中当日 60 天续期窗口自动重签 → 部署 → 服务正常 ✅ |
+
+**未测项（记录在案）**：LE 以外目标 CA 的实际签发（ZeroSSL 需 EAB 凭据，机制同一代码路径）；foreign-CA 存量切出的真实场景（sg 存量本为 LE，靠 acme.sh 官方 `--renew --server` 用法 + docker-box 先例 + 与 case 2 相同代码路径保证）；renew/deploy 失败路径的退出码；多证书场景（项目单证书设计，与 ssl.sh 一致）。用户决定不补测（2026-11-03）。
