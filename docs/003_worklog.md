@@ -121,7 +121,7 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 | 6 真实客户端 IP 两条路径 | ✅ | case 8 两模式均 seen_ip == from_ip == 168.138.212.150（非回环）；入口日志（marker SNI）与 xray from 交叉验证 | 11-03 |
 | 7 新请求偏移量断言 | ✅ | 切换脚本 verify_new_request 与 case 4–8 全部按字节偏移匹配 | 11-03 |
 | 8 daemon 重启后 443 独占 | ✅ | `sudo systemctl restart docker` 后 15s：容器仅 nginx/xray/acme（haproxy 无复活），443 两条 LISTEN（v4+v6），nginx 独占 | 11-03 |
-| 9 失败注入 ×3 | ✅ | a) 破坏 xray.stream.ngx → 切 nginx：渲染过、nginx -t 败 → rc=1 零影响退出，443 无损；b) 破坏 haproxy.cfg.tpl → 切 haproxy：启动败 → 单次回滚 rc=3，恢复模板后重切成功；c) CURL_BIN=/bin/false → 验证步败 → 单次回滚 rc=3，终态 nginx | 11-03 |
+| 9 失败注入 ×3 | ✅ | a) 破坏 xray.stream.ngx → 切 nginx：渲染过、nginx -t 败 → rc=1 零影响退出，443 无损；b) 破坏 haproxy.cfg.tpl → 切 haproxy：启动败 → 单次回滚 rc=3，恢复模板后重切成功；c) CURL_BIN=/bin/false → 验证步败 → 单次回滚 rc=3，终态 nginx。**补充（11-03 晚）**：c′) haproxy 基线下 CURL_BIN 注入切 nginx → 验证败 → **单次回滚到 haproxy** rc=3，终态 .env=haproxy、容器重建、443 TLS 正常——"回滚到 haproxy"方向闭环，失败注入覆盖双向回滚 | 11-03 |
 | 10 半完成修复 ×3 | ✅ | 7A 只改 .env → 收敛 rc=0；7B 只换激活文件 → 收敛 rc=0（初版脚本错滚致 443 掉线，修复 orig 透传后复测通过）；7C 只 docker rm haproxy → 重建收敛 rc=0 | 11-03 |
 
 ### 5.1 测试执行明细（时间线与关键证据）
@@ -162,6 +162,8 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 **11-03 09:47 收尾复跑 nginx 全量 —— 22 通过/1 警告/0 失败**，确认最终状态：nginx 默认入口、443 v4+v6 监听、haproxy 容器不存在
 
 **11-03 daemon 重启验证（验证项 8，用户交互执行）**——`sudo systemctl restart docker` 后 15s：容器仅 `nginx xray acme`（haproxy 无复活抢占），443 两条 LISTEN 由 nginx 独占 → 验证项 10/10 全过，实施清单 10 闭环
+
+**11-03 补充：失败回滚双向覆盖（c′ 注入）**——发现注入集只实测过"回滚到 nginx"（6b/6c 均为切向 haproxy 失败），"回滚到 haproxy"（`rollback haproxy` 正常语义：恢复 .env + 重建容器 + 校验 443）未走过。补测：haproxy 收敛基线下 `CURL_BIN=/bin/false switch nginx` → 前 4 步过、[5/5] 验证 3 次无请求 → 单次回滚 **rc=3**，终态 `.env=haproxy`、四容器齐、443 TLS 正常；随后切回 nginx（rc=0，status 五项全 OK）+ case 4 快测 5/0/0。至此失败注入覆盖**双向回滚**
 
 **case 8 归因细节（两模式通用证据形态）**：入口日志记录 marker SNI 连接（服务端视角源 IP）→ 本机 xray 客户端（SOCKS 11082，Vision）经公网出网 → xray_access.log 偏移后新行 `from <同一 IP> accepted tcp:www.google.com:443` ——三约束（源 IP 相等、目标 www.google.com:443、字节偏移之后）同时满足。注意 www.google.com 的解析必须发生在服务端（`--socks5-hostname`），bj01 本地 DNS 返回 `2001::1` 不可信（9-F10①）。
 
