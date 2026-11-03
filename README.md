@@ -126,6 +126,35 @@ scripts/ngx_haproxy_switch.sh nginx     # 切回 Nginx 入口（默认）
 
 设计规格、验证计划与实测修复记录见 [docs/README-003-nginx-haproxy-switch.md](docs/README-003-nginx-haproxy-switch.md)、[docs/003_worklog.md](docs/003_worklog.md)。
 
+## 证书管理（ACME）
+
+证书由 acme.sh 容器自动签发与续期（DNS 验证，支持阿里云/Cloudflare 多提供商），签发后自动部署到 nginx 与 xray（**完整链** `default_full.pem`，客户端严格校验无需、也**不允许** `allowInsecure`）。
+
+```bash
+# 查看证书列表 / 当前 CA / 到期时间
+docker exec acme acme.sh --list
+
+# 手动续期（正常无需操作，容器自动在到期窗口前完成）
+docker exec acme acme.sh --renew-all
+
+# 强制切换存量证书到指定 CA（与当前签发方无关；letsencrypt / zerossl / ...）
+docker exec acme sh /force_switch_ca.sh letsencrypt
+
+# 验证 443 出示的证书日期与签发方
+echo | openssl s_client -connect 127.0.0.1:443 -servername <你的域名> 2>/dev/null \
+  | openssl x509 -noout -dates -issuer
+```
+
+要点：
+
+| 项 | 说明 |
+|------|------|
+| 默认 CA | 初始化（`gen_env.sh`）默认 **Let's Encrypt**；已有 acme 状态的历史 CA 被尊重，不会被强制覆盖 |
+| force 切换 | 计入 CA 重复证书配额（LE 同名同 SAN 每周 5 张），**日常续期勿用**；切换后日常续期自动跟走新 CA |
+| ZeroSSL | 需先在 acme 容器环境注入 `ZEROSSL_EAB_KID` / `ZEROSSL_EAB_HMAC_KEY`（EAB 注册） |
+
+CA 策略与切换工具的设计规格见 [docs/README-004-acme-ca-switch.md](docs/README-004-acme-ca-switch.md)。
+
 ## 生成客户端配置
 
 项目提供了客户端配置生成脚本，支持生成二维码和配置链接。

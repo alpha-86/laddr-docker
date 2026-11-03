@@ -229,10 +229,9 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 
 ## 10. 后续变更记录（003 实测完成后）
 
-### 10.1 acme：新增 force_switch_ca.sh（CA 强制切换工具）
+### 10.1 acme：CA 策略拍板 + 新增 force_switch_ca.sh
 
-- **背景**：对比 docker-box 与 laddr 的 acme 体系后确认两者仅两处差异——ssl.sh 的 CA 默认设置时机（docker-box 每次启动无条件 set-default-ca，laddr 仅账号全新时）与 force 迁移脚本（docker-box 有 `force_to_letsencrypt.sh`）。经讨论（2026-11-03）拍板：**维持 laddr 现状（方案 A：初始化尊重环境历史，不引入每次强制）**；作为补充，新增通用的 `acme/force_switch_ca.sh`——支持把存量证书显式切换到任意 acme.sh 支持的 CA（letsencrypt / zerossl / buypass / sslcom / google / 自定义 ACME URL）。
-- **实现**：仿 docker-box 结构（自包含域名展开逻辑），`--server` 参数化：`--renew --force --server <CA>` 强制重签（**与存量证书当前签发方无关**——acme.sh v3.1.3 官方 renew 用法即支持 `--server`，重签成功后域名的 Le_API 持久化为新 CA，后续续期跟走新 CA）→ docker deploy-hook 重新部署（reload.sh 顺带重启 xray 加载新证书）→ `--set-default-ca` 对齐新默认。
-- **挂载**：`docker-compose.yml` acme 服务加挂 `${ACME_SH_PATH}/force_switch_ca.sh:/force_switch_ca.sh:ro`；用法 `docker exec acme sh /force_switch_ca.sh <ca>`。
-- **约束**：`--force` 计入 CA 重复证书配额（LE 同名同 SAN 每周 5 张），日常续期勿用；ZeroSSL 需容器环境提供 `ZEROSSL_EAB_KID` / `ZEROSSL_EAB_HMAC_KEY`。
-- **实测（sg，2026-11-03）**：无参 → 用法提示 exit 1；`letsencrypt` 端到端强制重签 + 部署 + 默认 CA 设置通过。未钉 acme.sh 镜像版本（用户明确不要）。
+> **规格唯一来源：[README-004-acme-ca-switch.md](README-004-acme-ca-switch.md)**（背景对比/方案决策/设计/验证/使用手册全在其中），本节仅记进展。
+
+- 对比 docker-box 与 laddr acme 体系：仅两处差异（ssl.sh 默认 CA 设置时机；docker-box 有 force 迁移脚本）。讨论后拍板：**方案 A 维持 laddr 初始化语义**（初始化默认 LE、尊重环境历史，不引入每次强制）+ 新增通用 `acme/force_switch_ca.sh`（`--renew --force --server <CA>` 强制切换存量证书到任意 CA）；不钉 acme.sh 镜像版本。
+- 交付：新脚本 + compose 一行挂载（纯新增，零删除）；sg 实测 usage 错误路径与 letsencrypt 端到端全过（详见 README-004 §4）。

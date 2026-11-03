@@ -411,7 +411,7 @@ docker exec acme acme.sh --renew-all
 docker exec acme sh /force_switch_ca.sh letsencrypt
 docker exec acme sh /force_switch_ca.sh zerossl   # ZeroSSL 需容器环境有 ZEROSSL_EAB_KID / ZEROSSL_EAB_HMAC_KEY
 ```
-脚本位于 `acme/force_switch_ca.sh`（容器内 `/force_switch_ca.sh`）。注意 `--force` 重签计入 CA 重复证书配额（LE 同名同 SAN 每周 5 张），日常续期勿用；初始化逻辑（ssl.sh）不受影响——仍尊重环境历史（CA 默认仅在账号全新时设为 LE）。
+脚本位于 `acme/force_switch_ca.sh`（容器内 `/force_switch_ca.sh`）。注意 `--force` 重签计入 CA 重复证书配额（LE 同名同 SAN 每周 5 张），日常续期勿用；初始化逻辑（ssl.sh）不受影响——仍尊重环境历史（CA 默认仅在账号全新时设为 LE）。规格见 `docs/README-004-acme-ca-switch.md`。
 
 ## Security Considerations
 
