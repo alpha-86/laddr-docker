@@ -94,7 +94,8 @@ Logging (Centralized)
 ├── docker-compose.yml              # Main service definitions (nginx default entry)
 ├── docker-compose-xray.yml         # Xray-specific service definition
 ├── docker-compose-haproxy.yml      # Optional HAProxy entry (enabled via COMPOSE_FILE)
-├── gen_env.sh                      # Environment setup (creates dirs + generates .env + renders stream)
+├── gen_env.sh                      # Environment setup (creates dirs + generates/updates .env + renders stream)
+│                                   # 三模式：fresh+TTY 向导 / -i 更新向导 / 非 TTY 静默（deploy 路径，行为历史一致）
 ├── .env                            # Environment configuration (generated)
 ├── .deployment-config              # Deployment server configuration (local only, gitignored)
 │
@@ -140,7 +141,10 @@ Logging (Centralized)
 │
 ├── docs/                           # Design docs & worklog
 │   ├── README-003-nginx-haproxy-switch.md  # 双入口设计规格（唯一规格来源）
-│   └── 003_worklog.md                      # 003 开发/实测进展与交接清单
+│   ├── README-004-acme-ca-switch.md        # ACME CA 策略与 force_switch_ca 规格
+│   ├── README-005-update-gen-env.md        # gen_env.sh 交互化重写规格（唯一规格来源）
+│   ├── 003_worklog.md                      # 003 开发/实测进展与交接清单
+│   └── 005_worklog.md                      # 005 进展、测试记录与 sg 验证待办
 │
 └── .claude/                        # Claude Code configuration
     └── settings.local.json        # Claude permissions and settings

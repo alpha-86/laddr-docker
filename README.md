@@ -70,7 +70,21 @@ cd laddr-docker
 
 ### 2. 配置环境变量
 
-编辑生成的 `.env` 文件，配置以下关键变量：
+`gen_env.sh` 按运行环境自动选择模式（2026-11 重写，见 [docs/README-005-update-gen-env.md](docs/README-005-update-gen-env.md)）：
+
+| 场景 | 模式 | 行为 |
+|------|------|------|
+| 全新 `.env` + 交互终端 | 向导 | 分块询问（DNS provider 选择、CA 选择、域名必填校验、UUID/REALITY 生成确认），默认值回车即过 |
+| 已有 `.env` + `-i` | 更新向导 | 按块编辑（Enter 跳过 / `e` 编辑），敏感项脱敏，写盘前摘要确认 |
+| 已有 `.env` 无参 / 非交互（deploy.sh） | 静默 | 保留现有值、缺失补默认，**行为与历史版本一致** |
+
+```bash
+./gen_env.sh          # 新机器：交互向导；已配置机器：静默合并并提示 -i
+./gen_env.sh -i       # 交互调整已有 .env（需在本机终端执行）
+./gen_env.sh --advanced  # 向导中启用环境目录等高级变量编辑
+```
+
+也可以直接编辑生成的 `.env` 文件，配置以下关键变量：
 
 ```bash
 # 阿里云 DNS（如果使用阿里云 DNS）
