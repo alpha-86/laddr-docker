@@ -103,18 +103,28 @@ docker compose up -d
 
 ## 入口模式切换（Nginx ↔ HAProxy）
 
-默认 Nginx 入口；`gen_env.sh` 初始化时可选择启用 HAProxy（`.env` 的 `COMPOSE_FILE` 追加 `:docker-compose-haproxy.yml`）。已部署服务器上在线切换：
+默认 **Nginx stream** 入口；需要 HAProxy 入口时，初始化 `gen_env.sh` 回答 `y` 启用，或部署后在**服务器本机**随时在线互切（443 秒级中断）：
 
 ```bash
-# 查看当前模式/收敛状态
+# 查看当前模式与收敛状态（.env / 激活文件 / 容器 / 443 监听者 等判据）
 scripts/ngx_haproxy_switch.sh status
 
-# 切换（幂等；秒级中断；任一步失败自动回滚到原模式）
-scripts/ngx_haproxy_switch.sh haproxy
-scripts/ngx_haproxy_switch.sh nginx
+# 切换（幂等；半完成状态自动收敛；失败自动回滚到切换前模式）
+scripts/ngx_haproxy_switch.sh haproxy   # 切到 HAProxy 入口
+scripts/ngx_haproxy_switch.sh nginx     # 切回 Nginx 入口（默认）
 ```
 
-切换脚本收敛判据：`.env` COMPOSE_FILE、stream 激活文件、容器状态（nginx 模式下 haproxy 容器被删除以防 restart:always 复活抢 443）、443 实际监听者。设计详见 [docs/README-003-nginx-haproxy-switch.md](docs/README-003-nginx-haproxy-switch.md)。
+行为要点（2026-11 sg 生产实测验证）：
+
+| 特性 | 说明 |
+|------|------|
+| 幂等 / 自修复 | 已处于目标模式时零操作退出；半完成状态（只改了 .env / 只换了激活文件 / 容器被删）重跑 `switch <目标>` 即自动收敛 |
+| 失败零影响前置 | 渲染 + `nginx -t` 在释放 443 之前完成，前置失败不触碰运行态（退出码 1） |
+| 失败自动回滚 | 容器启动 / 443 属主 / 新请求验证任一步失败，自动回滚到**切换前模式**并校验恢复结果（退出码 3） |
+| 退出码 | `0` 成功或已是目标模式；`1` 前置失败零影响；`2` 回滚后仍不通过（备份保留在 /tmp，需人工介入）；`3` 切换失败但已回滚恢复 |
+| 防复活 | 切到 nginx 模式时 haproxy 容器被 `docker rm`（非仅 stop），restart:always 不会在 daemon 重启后抢占 443（已实测） |
+
+设计规格、验证计划与实测修复记录见 [docs/README-003-nginx-haproxy-switch.md](docs/README-003-nginx-haproxy-switch.md)、[docs/003_worklog.md](docs/003_worklog.md)。
 
 ## 生成客户端配置
 
