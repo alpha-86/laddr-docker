@@ -207,6 +207,8 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 
 ## 9. 实测发现与修复记录（2026-11-03，按发现顺序）
 
+
+
 > 用户硬性要求：**不允许 allowInsecure**。所有修复以此为前提。
 
 | # | 问题（现象 → 根因） | 修复 |
@@ -224,3 +226,13 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 | F11 | case 8 随机选中**证书覆盖但公网无解析**的域名（`*.ddx.cqcy.host` NODATA）→ 执行机 openssl 无法解析 → marker 记录缺失 | test.sh 域名选型过滤"执行机可解析"候选（`domain_resolvable`，DEP_SERVER 感知）；case 8 前置加 DNS 解析检查，失败明示 |
 
 旁路观察：deploy.sh 每次部署都会跑 `gen_env.sh` → 重新渲染激活文件（按 .env 模式）——本次实测中它顺带修复过一次失败注入后的磁盘漂移，行为良性；但若将来移除该行为需注意激活文件不再随部署刷新。
+
+## 10. 后续变更记录（003 实测完成后）
+
+### 10.1 acme：新增 force_switch_ca.sh（CA 强制切换工具）
+
+- **背景**：对比 docker-box 与 laddr 的 acme 体系后确认两者仅两处差异——ssl.sh 的 CA 默认设置时机（docker-box 每次启动无条件 set-default-ca，laddr 仅账号全新时）与 force 迁移脚本（docker-box 有 `force_to_letsencrypt.sh`）。经讨论（2026-11-03）拍板：**维持 laddr 现状（方案 A：初始化尊重环境历史，不引入每次强制）**；作为补充，新增通用的 `acme/force_switch_ca.sh`——支持把存量证书显式切换到任意 acme.sh 支持的 CA（letsencrypt / zerossl / buypass / sslcom / google / 自定义 ACME URL）。
+- **实现**：仿 docker-box 结构（自包含域名展开逻辑），`--server` 参数化：`--renew --force --server <CA>` 强制重签（**与存量证书当前签发方无关**——acme.sh v3.1.3 官方 renew 用法即支持 `--server`，重签成功后域名的 Le_API 持久化为新 CA，后续续期跟走新 CA）→ docker deploy-hook 重新部署（reload.sh 顺带重启 xray 加载新证书）→ `--set-default-ca` 对齐新默认。
+- **挂载**：`docker-compose.yml` acme 服务加挂 `${ACME_SH_PATH}/force_switch_ca.sh:/force_switch_ca.sh:ro`；用法 `docker exec acme sh /force_switch_ca.sh <ca>`。
+- **约束**：`--force` 计入 CA 重复证书配额（LE 同名同 SAN 每周 5 张），日常续期勿用；ZeroSSL 需容器环境提供 `ZEROSSL_EAB_KID` / `ZEROSSL_EAB_HMAC_KEY`。
+- **实测（sg，2026-11-03）**：无参 → 用法提示 exit 1；`letsencrypt` 端到端强制重签 + 部署 + 默认 CA 设置通过。未钉 acme.sh 镜像版本（用户明确不要）。

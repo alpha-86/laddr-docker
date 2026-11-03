@@ -404,6 +404,15 @@ docker exec acme acme.sh --renew-all
 
 > **SSL 关键约束**：服务端必须出示**完整证书链**——nginx `ssl_certificate` 与 xray `certificateFile` 都用 `default_full.pem`（acme.sh docker hook 部署；`default_cert.pem` 仅为 leaf）。**禁止 `allowInsecure`**（用户硬性要求；xray 26.x 已移除该特性，配置含它直接拒载），客户端校验依赖完整链。
 
+#### Switch CA for Existing Certificates（一次性迁移）
+```bash
+# 强制把存量证书切换到指定 CA（与证书当前由哪家签发无关）：
+# --renew --force --server <CA> 重签 → docker deploy-hook 重新部署（reload nginx + 重启 xray）
+docker exec acme sh /force_switch_ca.sh letsencrypt
+docker exec acme sh /force_switch_ca.sh zerossl   # ZeroSSL 需容器环境有 ZEROSSL_EAB_KID / ZEROSSL_EAB_HMAC_KEY
+```
+脚本位于 `acme/force_switch_ca.sh`（容器内 `/force_switch_ca.sh`）。注意 `--force` 重签计入 CA 重复证书配额（LE 同名同 SAN 每周 5 张），日常续期勿用；初始化逻辑（ssl.sh）不受影响——仍尊重环境历史（CA 默认仅在账号全新时设为 LE）。
+
 ## Security Considerations
 
 ### 1. Proxy Protocol Configuration

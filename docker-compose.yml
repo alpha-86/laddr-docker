@@ -34,6 +34,7 @@ services:
     command: sh ./ssl.sh
     volumes:
       - ${ACME_SH_PATH}/ssl.sh:/ssl.sh:ro
+      - ${ACME_SH_PATH}/force_switch_ca.sh:/force_switch_ca.sh:ro
       - ${ACME_SH_PATH}/acme.sh:/acme.sh
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
