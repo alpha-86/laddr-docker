@@ -126,6 +126,45 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 | 9 失败注入 ×3 | ✅ | a) 破坏 xray.stream.ngx → 切 nginx：渲染过、nginx -t 败 → rc=1 零影响退出，443 无损；b) 破坏 haproxy.cfg.tpl → 切 haproxy：启动败 → 单次回滚 rc=3，恢复模板后重切成功；c) CURL_BIN=/bin/false → 验证步败 → 单次回滚 rc=3，终态 nginx | 11-03 |
 | 10 半完成修复 ×3 | ✅ | 7A 只改 .env → 收敛 rc=0；7B 只换激活文件 → 收敛 rc=0（初版脚本错滚致 443 掉线，修复 orig 透传后复测通过）；7C 只 docker rm haproxy → 重建收敛 rc=0 | 11-03 |
 
+### 5.1 测试执行明细（时间线与关键证据）
+
+> 完整命令序列见第 2 节 runbook。时间均为 2026-11-02/03（Asia/Shanghai）。过程中每次失败先修代码/设计再回到 runbook，修复详情见第 9 节。
+
+**11-02 23:00 迁移（验证项 1）**
+- 前置摸底：远端 `.env COMPOSE_FILE=docker-compose.yml:docker-compose-xray.yml`（旧结构），haproxy/xray/nginx/acme 四容器 Up 10 days
+- deploy.sh 输出"检测到旧版 HAProxy 容器 → 走迁移路径"，`docker rm` 旧容器后拉起 nginx/xray/acme；443 由 nginx（host 网络）监听，v4+v6 各一条 LISTEN
+
+**11-03 08:26 nginx 模式全量（验证项 2，含 case 7/8）—— 结果 22 通过/1 警告/0 失败**
+- case 4：`sni:blog.862436.xyz backend:ngx`，nginx access log 命中 querystring `r=21195`
+- case 5（Vision）：链路五组件对齐（测试开始/HTTP响应/客户端 08:26:47，入口路由/服务端 08:26:48），xray 服务端 `from 127.0.0.1:40246 accepted tcp:www.google.com:443`
+- case 6（XHTTP+REALITY）：`sni:www.fifa.com backend:xhttp`，HTTP 200
+- case 7：`openssl rc=0 / Verify return code: 0 (ok)`，入口日志 `backend:nf_xtls`
+- case 8（门禁）：marker SNI `extip18339.x.sg.862436.xyz` 命中入口日志，seen_ip == from_ip == 168.138.212.150（非回环）
+- 警告 1 条：case 2 "443 监听中但属主不可见（无 sudo），TLS 探测正常"——设计内退化
+
+**11-03 08:54 首次切换 haproxy —— 暴露 F3/F4（第 9 节）**
+- 现象：`xray.stream.haproxy` 注释桩缺 `$tcp_backend` 定义 → `nginx -t` emerg；修复分支又因 `atomic_replace` 的 set -u 展开顺序 bug 崩溃（`dst: unbound variable`）
+- 修复桩内补最小 map + atomic_replace 分行声明后，08:56 切换成功：5 步全过，验证请求 `sw15373.862436.xyz → ngx_backend` 按字节偏移命中 haproxy_access.log
+
+**11-03 08:58 haproxy 模式全量（验证项 3）—— 23 通过/1 警告/0 失败**
+- case 7：`nf_xtls_backend` 路由正确，PP v2 路径握手 `Verify 0 (ok)`
+- case 8 首次在 haproxy 模式执行：暴露 F10-③——seen_ip 提取 `awk '{print $1}'` 在 haproxy syslog 行上取到月份 "Nov"；修复为统一 ip:port 正则后单跑 case 8 与后续全量均通过
+
+**11-03 09:08 切回 nginx + 全量（验证项 4）—— 22 通过/1 警告/0 失败**，最终停在默认模式
+
+**11-03 09:1x 失败注入（验证项 9）**
+- 6a 破坏 `xray.stream.ngx`（服务端追加非法指令）→ `switch nginx`：渲染过、nginx -t 失败 → rc=1 零影响退出，443 TLS 探测 `Verify 0 (ok)` 无损；此过程暴露并修复"nginx -t 失败还原逻辑误写对端桩"（见 9-F7 前置修复）
+- 6b 破坏 `haproxy.cfg.tpl` → `switch haproxy`：容器启动失败 → 自动回滚；**初版脚本暴露 F5/F6**——回滚后竟继续执行 verify、二次回滚后报"已切换成功 rc=0"（restart:always 崩溃重启的瞬时 running 窗口同时骗过属主检查）；修复 rollback 终止性（exit 3）+ `haproxy_stable_running` 双采样后复测：单次回滚 rc=3、终态 nginx 一致；恢复模板后重切 haproxy 成功（rc=0，`sw3464` 验证命中）
+- 6c `CURL_BIN=/bin/false`（远端环境变量注入）→ `switch haproxy`：验证步 3 次尝试均不发请求 → 单次回滚 rc=3，终态 nginx、无 haproxy 容器
+
+**11-03 09:3x 半完成修复（验证项 10）—— 初测暴露 F7，修复后三连过**
+- 7B 初测（只换激活文件为 haproxy 桩、.env 仍 nginx，`switch nginx` 自修复）：`wait_443_free` 因 443 由 nginx 持续持有必然超时 → 错滚到 haproxy → 回滚校验失败 exit 2，**且 443 掉线**（回滚把 nginx 按桩重启了）
+- 修复（orig 透传 + remove/wait 条件化）后复测：7B rc=0 / 7C（只 docker rm haproxy）rc=0 容器重建 / 7A（只改 .env）rc=0；清理全部遗留备份目录
+
+**11-03 09:47 收尾复跑 nginx 全量 —— 22 通过/1 警告/0 失败**，确认最终状态：nginx 默认入口、443 v4+v6 监听、haproxy 容器不存在
+
+**case 8 归因细节（两模式通用证据形态）**：入口日志记录 marker SNI 连接（服务端视角源 IP）→ 本机 xray 客户端（SOCKS 11082，Vision）经公网出网 → xray_access.log 偏移后新行 `from <同一 IP> accepted tcp:www.google.com:443` ——三约束（源 IP 相等、目标 www.google.com:443、字节偏移之后）同时满足。注意 www.google.com 的解析必须发生在服务端（`--socks5-hostname`），bj01 本地 DNS 返回 `2001::1` 不可信（9-F10①）。
+
 ---
 
 ## 6. 交接清单（环境事实，新会话/他人必读）
@@ -160,7 +199,8 @@ curl 失败注入改 **`CURL_BIN` 环境变量注入 stub**（验证域名取自
 - `0b0e410` docs: worklog 交接清单
 - `73d4929` feat: 实施清单 7–9（deploy/test/文档）+ 003 三轮修订 + 切换脚本 CURL_BIN/偏移量/备份清理
 - `7e0b9d4` / `25843bc`: 四轮 review + worklog 重构（历史，先于本轮实测）
-- （本轮实测修复提交，哈希见仓库最新）
+- `1ed0046` fix: sg 实测修复（实施清单 10）— 证书全链/禁 allowInsecure/切换脚本回滚与自修复等 11 项（第 9 节）+ 本文档 §1/§2/§5/§7 刷新
+- （本次）docs: worklog 补充测试执行明细（§5.1 时间线与关键证据）
 
 ## 9. 实测发现与修复记录（2026-11-03，按发现顺序）
 
