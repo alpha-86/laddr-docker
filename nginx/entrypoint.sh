@@ -4,7 +4,7 @@
 
 # 证书文件
 CERT_KEY="/etc/nginx/cert/default_key.pem"
-CERT_CRT="/etc/nginx/cert/default_cert.pem"
+CERT_CRT="/etc/nginx/cert/default_full.pem"
 
 # 等待证书文件生成
 while [ ! -f "$CERT_KEY" ] || [ ! -f "$CERT_CRT" ]; do

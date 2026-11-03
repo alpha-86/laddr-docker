@@ -123,6 +123,18 @@ extract_cert_domains() {
     return 0
 }
 
+# 候选域名可解析性检查：case 8 从执行机经公网直连 Vision 域名，依赖真实 DNS 记录——
+# 证书 SAN 覆盖 ≠ DNS 有解析（运营只在部分子域建通配符记录，实测 *.ddx.cqcy.host NODATA）。
+# getent 对被污染域名可能返回垃圾，但候选均为自有域，结果可信。
+domain_resolvable() {
+    local d="$1"
+    if [ -n "${DEP_SERVER:-}" ]; then
+        ssh -o ConnectTimeout=5 "$DEP_SERVER" "getent hosts $d" >/dev/null 2>&1
+    else
+        getent hosts "$d" >/dev/null 2>&1
+    fi
+}
+
 # 根据规则选择测试域名
 select_test_domains() {
     log_info "根据分流规则选择测试域名..."
@@ -175,6 +187,21 @@ select_test_domains() {
         done)
 
         if [ -n "$wildcard_four_level_domains" ]; then
+            # 优先从执行机可解析的通配符候选中随机选（case 8 公网直连依赖真实 DNS）；
+            # 解析检查与具体前缀无关（通配符等效），统一用 x. 前缀探测
+            local resolvable_candidates=""
+            for d in $wildcard_four_level_domains; do
+                if domain_resolvable "x.${d#\*.}"; then
+                    resolvable_candidates="$resolvable_candidates $d"
+                fi
+            done
+            if [ -n "$resolvable_candidates" ]; then
+                log_info "可解析候选: $resolvable_candidates"
+                wildcard_four_level_domains="$resolvable_candidates"
+            else
+                log_info "警告: 无可解析的四级通配符候选（case 8 可能因 DNS 前置失败）"
+            fi
+
             # 随机选择一个通配符四级域名
             local domains_array=($wildcard_four_level_domains)
             local domain_count=${#domains_array[@]}
@@ -380,15 +407,21 @@ test_case_2() {
     echo ""
 
     # HAProxy 和 Nginx 使用 host 模式，检查宿主机端口；属主须与入口模式一致
+    # 无 sudo 时 ss -tlnp 无 users: 属主字段 → 退化为 TLS 探测（WARN 不判失败，同切换脚本策略）
     local owner443=$(remote_cmd "ss -tlnp 2>/dev/null | grep ':443 ' | head -1")
-    if [ -n "$owner443" ]; then
-        if echo "$owner443" | grep -q "$ENTRY_MODE"; then
-            test_pass "443 端口监听中（属主: $ENTRY_MODE）"
+    if [ -n "$owner443" ] && echo "$owner443" | grep -q "$ENTRY_MODE"; then
+        test_pass "443 端口监听中（属主: $ENTRY_MODE）"
+    elif [ -n "$owner443" ] && ! echo "$owner443" | grep -q 'users:'; then
+        # 属主不可见（work 用户无 sudo）：确认 443 监听 + TLS 探测成功即可
+        if remote_cmd "echo | timeout 5 openssl s_client -connect 127.0.0.1:443 >/dev/null 2>&1"; then
+            test_warn "443 监听中但属主不可见（无 sudo），TLS 探测正常（期望属主: $ENTRY_MODE）"
         else
-            test_fail "443 占用进程与入口模式不符（期望 $ENTRY_MODE）: $owner443"
+            test_fail "443 端口监听但 TLS 探测失败（期望属主: $ENTRY_MODE 且 TLS 正常）"
         fi
-    else
+    elif [ -z "$owner443" ]; then
         test_fail "443 端口未监听"
+    else
+        test_fail "443 占用进程与入口模式不符（期望 $ENTRY_MODE）: $owner443"
     fi
 
     if remote_cmd "ss -tlnp | grep ':80'" >/dev/null 2>&1; then
@@ -424,11 +457,11 @@ test_case_3() {
     echo "=========================================="
     echo ""
 
-    # 检查证书文件
-    if remote_cmd "docker exec nginx test -f /etc/nginx/cert/default_cert.pem" >/dev/null 2>&1; then
-        test_pass "证书文件 default_cert.pem 存在"
+    # 检查证书文件（服务端出示 default_full.pem 完整链，无 allowInsecure 的客户端才能校验通过）
+    if remote_cmd "docker exec nginx test -f /etc/nginx/cert/default_full.pem" >/dev/null 2>&1; then
+        test_pass "证书文件 default_full.pem 存在"
     else
-        test_fail "证书文件 default_cert.pem 不存在"
+        test_fail "证书文件 default_full.pem 不存在"
         return 1
     fi
 
@@ -623,7 +656,6 @@ test_case_5() {
         "security": "tls",
         "tlsSettings": {
           "serverName": "$clean_domain",
-          "allowInsecure": true,
           "fingerprint": "chrome"
         }
       }
@@ -699,23 +731,26 @@ EOF
     }
     trap cleanup_xray EXIT INT TERM
 
-    # 等待客户端启动
-    sleep 5
-
-    # 检查端口是否监听
-    local port_check=$(remote_cmd "ss -tlnp | grep ':11080'" 2>/dev/null)
+    # 等待客户端监听端口（轮询防竞态：慢链路上 xray 实际监听可能晚于固定 sleep）
+    # 注意：轮询未命中时 grep 退出码 1，赋值语句须 `|| true`，否则 set -e 会在循环内直接退出
+    local port_check=""
+    for _ in $(seq 1 15); do
+        port_check=$(remote_cmd "ss -tln | grep ':11080'" 2>/dev/null) || true
+        [ -n "$port_check" ] && break
+        sleep 1
+    done
     if [ -n "$port_check" ]; then
         test_pass "Xray 客户端在宿主机启动成功（端口11080）"
         log_info "  端口监听: $port_check"
     else
         test_fail "Xray 客户端启动失败"
-        # 显示错误信息
+        # 显示错误信息（error 日志按客户端配置写在 log_dir，不在 temp_dir）
         log_info "检查启动日志..."
         local startup_log=$(remote_cmd "cat $temp_dir/client_stdout.log 2>/dev/null | head -10")
         if [ -n "$startup_log" ]; then
             log_info "启动日志: $startup_log"
         fi
-        local error_log=$(remote_cmd "cat $temp_dir/client_error.log 2>/dev/null | head -10")
+        local error_log=$(remote_cmd "tail -10 $log_dir/${client_log_prefix}_error.log 2>/dev/null")
         if [ -n "$error_log" ]; then
             log_info "错误日志: $error_log"
         fi
@@ -1242,11 +1277,13 @@ EOF
     }
     trap cleanup_xray_xhttp EXIT INT TERM
 
-    # 等待客户端启动
-    sleep 5
-
-    # 检查端口是否监听
-    local port_check=$(remote_cmd "ss -tlnp | grep ':11081'" 2>/dev/null)
+    # 等待客户端监听端口（轮询防竞态；grep 未命中退出码 1，须 || true 防 set -e 退出）
+    local port_check=""
+    for _ in $(seq 1 15); do
+        port_check=$(remote_cmd "ss -tln | grep ':11081'" 2>/dev/null) || true
+        [ -n "$port_check" ] && break
+        sleep 1
+    done
     if [ -n "$port_check" ]; then
         test_pass "Xray XHTTP 客户端在宿主机启动成功（端口11081）"
         log_info "  端口监听: $port_check"
@@ -1257,6 +1294,10 @@ EOF
         local startup_log=$(remote_cmd "cat $temp_dir/client_stdout.log 2>/dev/null | head -10")
         if [ -n "$startup_log" ]; then
             log_info "启动日志: $startup_log"
+        fi
+        local error_log=$(remote_cmd "tail -10 $log_dir/${client_log_prefix}_error.log 2>/dev/null")
+        if [ -n "$error_log" ]; then
+            log_info "错误日志: $error_log"
         fi
         # 清理并返回（保留日志文件）
         cleanup_xray_xhttp
@@ -1691,6 +1732,12 @@ test_case_8() {
         return 1
     fi
 
+    # 前置：Vision 域名须在执行机可解析（case 8 经公网直连该域名；证书覆盖 ≠ DNS 有记录）
+    if ! domain_resolvable "$XRAY_TEST_DOMAIN"; then
+        test_fail "执行机无法解析 $XRAY_TEST_DOMAIN（case 8 前置：公网 DNS 可解析，证书覆盖不代表有解析记录）"
+        return 1
+    fi
+
     local xray_uuid=$(remote_cmd "grep '^XRAY_UUID_9000=' .env | head -1 | cut -d'=' -f2 | tr -d '\"'" 2>/dev/null)
     [ -z "$xray_uuid" ] && xray_uuid=$(remote_cmd "grep '^XRAY_UUID=' .env | head -1 | cut -d'=' -f2 | tr -d '\"'" 2>/dev/null)
     if [ -z "$xray_uuid" ]; then
@@ -1723,7 +1770,7 @@ test_case_8() {
       "settings": { "vnext": [ { "address": "$XRAY_TEST_DOMAIN", "port": 443,
         "users": [ { "id": "$xray_uuid", "flow": "xtls-rprx-vision", "encryption": "none" } ] } ] },
       "streamSettings": { "network": "tcp", "security": "tls",
-        "tlsSettings": { "serverName": "$XRAY_TEST_DOMAIN", "allowInsecure": true, "fingerprint": "chrome" } }
+        "tlsSettings": { "serverName": "$XRAY_TEST_DOMAIN", "fingerprint": "chrome" } }
     }
   ]
 }
@@ -1744,10 +1791,13 @@ EOF
     dep_exec "echo | timeout 8 openssl s_client -connect $XRAY_TEST_DOMAIN:443 -servername '$marker_sni' >/dev/null 2>&1" || true
     sleep 2
 
-    local seen_ip=$(remote_cmd "tail -c +$((pos_route + 1)) $route_log | grep 'sni:$marker_sni' | tail -1 | awk '{print \$1}' | cut -d: -f1" 2>/dev/null)
+    # 提取入口视角客户端 IP：两种入口日志格式不同，但行首第一个 ip:port 均为客户端
+    #   nginx:   <ip>:<port> [time] sni:... backend:...
+    #   haproxy: <syslog前缀> haproxy[pid]: <ip>:<port> [time] ... sni:...（awk $1 会取到月份 "Nov"）
+    local seen_ip=$(remote_cmd "tail -c +$((pos_route + 1)) $route_log | grep 'sni:$marker_sni' | tail -1 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+' | head -1 | cut -d: -f1" 2>/dev/null)
     if [ -z "$seen_ip" ]; then
         test_fail "入口日志未找到 marker SNI=$marker_sni 的记录（执行机→服务器 443 公网可达性前置未满足？）"
-        dep_exec "pkill -f 'xray run -c $dep_tmp/client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null
+        dep_exec "pkill -f 'xray run -c client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null
         return 1
     fi
     log_info "服务端视角执行机源 IP: $seen_ip"
@@ -1757,11 +1807,32 @@ EOF
     pos_xray=${pos_xray:-0}
 
     dep_exec "cd $dep_tmp && nohup ./xray run -c client_config.json > client_stdout.log 2>&1 & echo \$! > xray.pid" >/dev/null 2>&1
-    sleep 5
 
-    dep_exec "curl -s --max-time 15 --socks5 127.0.0.1:11082 -o /dev/null -w '%{http_code}' https://www.google.com" >/dev/null 2>&1 || true
+    # 等待客户端监听（轮询防竞态：慢链路上 xray 实际监听可能晚于固定 sleep）
+    local dep_up=""
+    for _ in $(seq 1 20); do
+        if dep_exec "bash -c 'exec 3<>/dev/tcp/127.0.0.1/11082' 2>/dev/null"; then
+            dep_up="ok"
+            break
+        fi
+        sleep 1
+    done
+    if [ -z "$dep_up" ]; then
+        test_fail "执行机 xray 客户端未在 11082 监听（客户端启动失败？）"
+        local dep_log=$(dep_exec "tail -10 $dep_tmp/client_stdout.log 2>/dev/null" 2>/dev/null)
+        [ -n "$dep_log" ] && log_info "客户端启动日志: $dep_log"
+        dep_exec "pkill -f 'xray run -c client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null || true
+        return 1
+    fi
+
+    # 必须 --socks5-hostname：执行机（如 bj01）本地 DNS 对境外域名污染（实测返回 2001::1），
+    # --socks5 本地解析会把被污染的 IP 发给代理，服务端日志目标变成裸 IP，
+    # 归因 grep www.google.com:443 必然失配；socks5h 把域名交给服务端解析。
+    dep_exec "curl -s --max-time 15 --socks5-hostname 127.0.0.1:11082 -o /dev/null -w '%{http_code}' https://www.google.com" >/dev/null 2>&1 || true
     sleep 2
-    dep_exec "pkill -f 'xray run -c $dep_tmp/client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null || true
+    # pkill 模式须与进程 cmdline 匹配：客户端以 cd 进目录后 ./xray 相对路径启动，
+    # cmdline 为 './xray run -c client_config.json'，带 $dep_tmp 绝对路径的模式永不匹配（实测残留）
+    dep_exec "pkill -f 'xray run -c client_config.json' 2>/dev/null; rm -rf $dep_tmp" 2>/dev/null || true
 
     # 归因约束：from == seen_ip 且 目标 == www.google.com:443 且 位于字节偏移之后（四轮 review 修正）
     local from_ip=$(remote_cmd "tail -c +$((pos_xray + 1)) log/xray_access.log | grep 'from ${seen_ip}:' | grep 'accepted.*www\.google\.com:443' | tail -1 | grep -o 'from [0-9.]*:' | awk '{print \$2}' | tr -d ':'" 2>/dev/null)

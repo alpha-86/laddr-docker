@@ -24,6 +24,9 @@
 #
 # 用法（仅服务器本机执行）：
 #   scripts/ngx_haproxy_switch.sh nginx|haproxy|status
+#
+# 退出码：0=已处于目标模式或切换成功；1=渲染/nginx -t 前置失败（零影响）；
+#         2=回滚后校验仍不通过（需人工介入，备份目录保留）；3=切换失败但已自动回滚恢复
 
 set -u
 
@@ -75,6 +78,13 @@ current_mode() {
 
 haproxy_container_exists() { [ -n "$(docker ps -aq --filter 'name=^haproxy$')" ]; }
 haproxy_container_running() { [ -n "$(docker ps -q --filter 'name=^haproxy$')" ]; }
+# restart:always 下配置错误会崩溃重启，running 状态只在重启间隔瞬时成立——
+# 连续两次采样（间隔 2s）均为 running 才算稳定运行（6b 注入实测：单采样被瞬时窗口骗过）
+haproxy_stable_running() {
+    haproxy_container_running || return 1
+    sleep 2
+    haproxy_container_running
+}
 nginx_container_running()   { [ -n "$(docker ps -q --filter 'name=^nginx$')" ]; }
 
 # 删除 haproxy 容器（直操 docker，与 COMPOSE_FILE 状态无关）；不存在则跳过
@@ -144,7 +154,10 @@ render_to_tmp() {
 nginx_config_test() { docker exec nginx nginx -t >/dev/null 2>&1; }
 
 atomic_replace() {
-    local src="$1" dst="$2" tmp="$dst.tmp.switch.$$"
+    # 注意：不能写成 local src="$1" dst="$2" tmp="$dst..." ——
+    # local 所有赋值的展开发生在命令执行前，$dst 此刻未定义，set -u 下直接报错
+    local src="$1" dst="$2"
+    local tmp="$dst.tmp.switch.$$"
     cp "$src" "$tmp" && mv -f "$tmp" "$dst"
 }
 
@@ -312,6 +325,9 @@ make_backup() {
 }
 
 # ---- 失败回滚（按原模式分别定义，直操 docker 与 compose 状态无关） ----
+# 回滚是终止性操作：成功恢复后 exit 3（切换失败但已回滚），恢复失败 exit 2。
+# 调用点一律 `|| rollback <原模式>`——若 rollback 只是 return，调用方会继续执行后续步骤，
+# 实测出现"回滚后继续 verify → 二次回滚 → 最终报已切换成功 rc=0"的严重误导（6b 注入暴露）。
 rollback() {
     local orig="$1"
     log_error "切换失败，开始自动回滚到 $orig 模式..."
@@ -326,8 +342,8 @@ rollback() {
         docker compose restart nginx >/dev/null 2>&1
         if wait_443_owner nginx 30; then
             rm -rf "$BAK_DIR"   # 回滚成功：系统状态与原一致，备份无保留价值
-            log_ok "回滚完成：已恢复 nginx 模式，443 由 nginx 监听"
-            return 0
+            log_ok "回滚完成：已恢复 $orig 模式"
+            exit 3
         fi
     else
         # 回滚到 haproxy：恢复 .env 与空激活文件 → 重启 nginx 释放 443 →
@@ -337,10 +353,10 @@ rollback() {
         docker compose restart nginx >/dev/null 2>&1
         wait_443_free 30 || true
         docker compose up -d >/dev/null 2>&1
-        if haproxy_container_running && wait_443_owner haproxy 30; then
+        if haproxy_stable_running && wait_443_owner haproxy 30; then
             rm -rf "$BAK_DIR"   # 回滚成功：系统状态与原一致，备份无保留价值
-            log_ok "回滚完成：已恢复 haproxy 模式，443 由 haproxy 监听"
-            return 0
+            log_ok "回滚完成：已恢复 $orig 模式"
+            exit 3
         fi
     fi
 
@@ -349,42 +365,57 @@ rollback() {
 }
 
 # ---- 切换：→ nginx ----
+# 参数1 = 切换前模式（回滚目标）。自修复场景（当前=目标）下回滚目标必须是原模式本身，
+# 不能硬编码对端——实测硬编码回滚到 haproxy 会把 .env=nginx 的系统回滚成 haproxy 期待，
+# 最终 exit 2 且 443 无人持有（半完成 7B 注入暴露）。
 switch_to_nginx() {
+    local orig="$1"
     log_info "[1/5] 渲染 nginx 版激活文件并 nginx -t（不触碰运行态，失败零影响）..."
     sh "$RENDER" nginx || die "渲染失败，未做任何变更"
     if ! nginx_config_test; then
-        # 还原激活文件为当前模式（若之前存在），保持运行态与磁盘一致
-        tmp="$(render_to_tmp haproxy 2>/dev/null)" || tmp=""
-        [ -n "$tmp" ] && { [ -f "$ACTIVE_FILE" ] && atomic_replace "$tmp" "$ACTIVE_FILE"; rm -f "$tmp"; }
+        # 还原激活文件为切换前状态（备份优先，与运行态一致）；
+        # 不可用渲染对端模式兜底（仅当从 haproxy 切换时等价）
+        if [ -f "$BAK_DIR/xray.stream" ]; then
+            atomic_replace "$BAK_DIR/xray.stream" "$ACTIVE_FILE"
+        else
+            tmp="$(render_to_tmp haproxy 2>/dev/null)" || tmp=""
+            [ -n "$tmp" ] && { [ -f "$ACTIVE_FILE" ] && atomic_replace "$tmp" "$ACTIVE_FILE"; rm -f "$tmp"; }
+        fi
         die "nginx -t 失败，已恢复激活文件，443 仍由原入口持有（服务未受影响）"
     fi
     log_ok "渲染与 nginx -t 通过"
 
-    log_info "[2/5] 停止并删除 haproxy 容器（直操 docker，半完成状态下 compose 可能已不认识它）..."
-    remove_haproxy_container || rollback haproxy
-    wait_443_free 30 || rollback haproxy
-    log_ok "haproxy 已删除，443 已释放"
+    # haproxy 容器存在才需移除并等待 443 释放；自修复（nginx→nginx）时 443 由
+    # nginx 持续持有，wait_443_free 必然超时——不能无条件等待（半完成 7B 注入暴露）
+    if haproxy_container_exists; then
+        log_info "[2/5] 停止并删除 haproxy 容器（直操 docker，半完成状态下 compose 可能已不认识它）..."
+        remove_haproxy_container || rollback "$orig"
+        wait_443_free 30 || rollback "$orig"
+        log_ok "haproxy 已删除，443 已释放"
+    fi
 
     log_info "[3/5] 原子更新 .env（移除 docker-compose-haproxy.yml）..."
     sed 's/:docker-compose-haproxy\.yml//g' "$BAK_DIR/env" | grep -v '^$' \
         > "$ENV_FILE.tmp.switch.$$" \
         && mv -f "$ENV_FILE.tmp.switch.$$" "$ENV_FILE" \
-        || rollback haproxy
+        || rollback "$orig"
     log_ok ".env 已更新为 nginx 模式"
 
     log_info "[4/5] 重启 nginx 接管 443..."
-    docker compose restart nginx >/dev/null 2>&1 || rollback haproxy
-    wait_443_owner nginx 30 || rollback haproxy
+    docker compose restart nginx >/dev/null 2>&1 || rollback "$orig"
+    wait_443_owner nginx 30 || rollback "$orig"
     log_ok "443 已由 nginx 监听"
 
     log_info "[5/5] 新请求验证..."
-    verify_new_request nginx || rollback haproxy
+    verify_new_request nginx || rollback "$orig"
 
     log_ok "已切换到 nginx 模式"
 }
 
 # ---- 切换：→ haproxy ----
+# 参数1 = 切换前模式（回滚目标），同上
 switch_to_haproxy() {
+    local orig="$1"
     log_info "[1/5] 放置 haproxy 版（空）激活文件并 nginx -t..."
     sh "$RENDER" haproxy || die "渲染失败，未做任何变更"
     if ! nginx_config_test; then
@@ -400,23 +431,27 @@ switch_to_haproxy() {
         sed 's|^\(COMPOSE_FILE=.*\)$|\1:docker-compose-haproxy.yml|' "$BAK_DIR/env" \
             > "$ENV_FILE.tmp.switch.$$" \
             && mv -f "$ENV_FILE.tmp.switch.$$" "$ENV_FILE" \
-            || rollback nginx
+            || rollback "$orig"
     fi
     log_ok ".env 已更新为 haproxy 模式"
 
     log_info "[3/5] 重启 nginx 释放 443..."
-    docker compose restart nginx >/dev/null 2>&1 || rollback nginx
-    wait_443_free 30 || rollback nginx
+    docker compose restart nginx >/dev/null 2>&1 || rollback "$orig"
+    # 仅当原模式为 nginx（nginx 原持有 443）才需等待释放；自修复（haproxy→haproxy）
+    # 时 443 由 haproxy 持续持有，等待释放必然超时（半完成 7C 场景）
+    if [ "$orig" = "nginx" ]; then
+        wait_443_free 30 || rollback "$orig"
+    fi
     log_ok "443 已释放"
 
     log_info "[4/5] 启动 haproxy（新模板渲染，含 send-proxy-v2）..."
-    docker compose up -d >/dev/null 2>&1 || rollback nginx
-    haproxy_container_running || rollback nginx
-    wait_443_owner haproxy 30 || rollback nginx
+    docker compose up -d >/dev/null 2>&1 || rollback "$orig"
+    haproxy_stable_running || rollback "$orig"
+    wait_443_owner haproxy 30 || rollback "$orig"
     log_ok "443 已由 haproxy 监听"
 
     log_info "[5/5] 新请求验证..."
-    verify_new_request haproxy || rollback nginx
+    verify_new_request haproxy || rollback "$orig"
 
     log_ok "已切换到 haproxy 模式"
 }
@@ -467,7 +502,7 @@ main() {
             fi
             log_warn "未完全收敛，开始执行切换/修复...（备份: $BAK_DIR）"
             echo ""
-            if [ "$target" = "nginx" ]; then switch_to_nginx; else switch_to_haproxy; fi
+            if [ "$target" = "nginx" ]; then switch_to_nginx "$cur"; else switch_to_haproxy "$cur"; fi
             rm -rf "$BAK_DIR"   # 切换成功：清理含 .env 的备份，避免敏感备份长期积累
             echo ""
             log_ok "完成。可用 scripts/ngx_haproxy_switch.sh status 查看状态"

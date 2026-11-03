@@ -1,3 +1,11 @@
 # HAProxy 入口模式：443 由 HAProxy 容器接管（docker-compose-haproxy.yml）
-# 本文件有意为空 —— stream 块不监听任何端口，避免与 HAProxy 抢占 443
+# 本文件不监听任何端口，避免与 HAProxy 抢占 443
 # nginx 模式下 scripts/render_stream.sh 会用 xray.stream.ngx 渲染结果替换激活文件
+#
+# tcp_backend 变量必须始终有定义：tcp_stream_params 的 stream log_format 引用它，
+# nginx 加载时校验 log_format 变量存在性（haproxy 模式下若无 map 定义会报
+# unknown "tcp_backend" variable 导致 nginx -t 失败）。
+# 此处给最小空 map（无 server 块则永不取值；nginx 模式的完整 SNI 路由 map 见 xray.stream.ngx）
+map $ssl_preread_server_name $tcp_backend {
+    default ngx;
+}
