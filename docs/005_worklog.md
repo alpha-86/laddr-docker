@@ -14,7 +14,7 @@
 | 设计（README-005） | ✅ 定稿（4 个决策点用户拍板，见文档 §2） |
 | 代码（gen_env.sh 重写） | ✅ 完成（三模式 + 修复，函数化单文件） |
 | 本地测试（T1–T9，49 项） | ✅ 全部通过（2026-11-03，bj01）；实现期修复 5 个测试暴露的问题 |
-| sg 生产验证 | ⏳ 待下次 deploy 观察 silent 输出 + 手动 `-i` 冒烟（见 §5 待办） |
+| sg 生产验证 | ✅ 完成（2026-11-03，冒烟 S1–S4 + 容器健康，见第 7 节） |
 
 **核心结论（审阅者必读）**：
 silent 路径（deploy.sh 唯一用到的路径）与历史版本**逐字节等价**（已有 `.env` 值零漂移），
@@ -69,13 +69,10 @@ silent 路径（deploy.sh 唯一用到的路径）与历史版本**逐字节等�
 
 ## 5. 交接清单（待办与验证入口）
 
-1. **sg 生产验证**（下次 deploy 时）：
+1. **sg 生产验证** — ✅ 已完成（2026-11-03，冒烟 S1–S4 全过，见第 7 节）；下次正常
+   deploy 时再顺带对比一次输出即可：
    - deploy 输出与历史对比：应仅有"目录结构初始化完成"+（无新增/变更时无报告）+
      "已生成 .env"——**不应出现** REALITY 相关行（线上公私钥齐全，不触发修复）；
-   - `ssh work@sg.cqcy.fun "cd /home/work/laddr-docker && ./gen_env.sh"`（无参，TTY）
-     → 期望：silent 合并 + 末尾提示 `-i`；
-   - `ssh -t work@sg.cqcy.fun "cd /home/work/laddr-docker && ./gen_env.sh -i"` 冒烟：
-     全 Enter 跳过，`.env` 不变（可先 `cp .env /tmp/.env.bak` 后 diff）。
 2. **新机器初始化验证**（如有机会）：fresh 跑向导 → `xray x25519 -i <私钥>` 验证
    公钥匹配 → case 6（xhttp）实测。
 3. push 必须用 SSH URL（仓库环境事实，见 003_worklog §6）。
@@ -85,3 +82,19 @@ silent 路径（deploy.sh 唯一用到的路径）与历史版本**逐字节等�
 | 提交 | 内容 |
 |------|------|
 | 533ec44 | feat(gen_env): 交互化重写（三模式向导）+ fresh-init 两 bug 修复 + 005 文档（5 文件，+1088/-182） |
+| ca3d32c | docs(worklog): 005 提交记录回填实际 commit 号（533ec44） |
+
+## 7. sg 生产冒烟记录（2026-11-03，新 gen_env.sh 已同步 sg）
+
+> 方式：rsync 单文件同步（不跑 deploy、不重启服务），`.env` 先备份 `/tmp/.env.bak.005`，
+> 每项断言 md5/diff。基线：`.env`=7f633ed9…、`xray.stream`=215f3fb4…
+
+| 步骤 | 场景 | 结果 |
+|------|------|------|
+| S1 | 非 TTY 无参（= deploy 路径，ssh 无 pty） | ✅ silent 合并 rc=0；报告仅"值已变更"（存量值≠新默认的展示层差异，与历史语义一致）；无 REALITY 修复行（不白跑 docker）；`.env`/stream 双 md5 不变 |
+| S2 | TTY 无参（`ssh -tt` 强制 pty；注意单 `-t` 在本地 stdin 非 TTY 时会被 OpenSSH 降级为无 pty） | ✅ silent 合并 + 末尾 hint「请运行 ./gen_env.sh -i」；`.env` 不变 |
+| S3 | `-i` 更新向导全 Enter 跳过 | ✅ 向导流程完整（入口只读展示、按块闸门、（无变更）、确认写入）；`.env` 逐字节不变；stream 渲染不漂移 |
+| S4 | `-i` 真实编辑 DOMAIN_LIST（追加 `SMOKE_MARKER`）→ 断言 → 还原 | ✅ diff 恰好 1 行（仅 DOMAIN_LIST）；变更摘要正确展示 old→new；`cp` 还原后双 md5 回基线，备份清除 |
+| 收尾 | `test.sh --case 1` 容器健康 | ✅ 3 通过 0 失败（acme/nginx/xray 全运行，无服务中断） |
+
+遗留：sg 上的 `gen_env.sh` 现为新版（与 b1 一致）；下次正常 deploy 会同样同步，无额外动作。
